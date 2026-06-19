@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { supabase } from "../../../lib/supabaseClient";
+import { supabase, withRetry } from "../../../lib/supabaseClient";
 import AuthBackground from "../_components/AuthBackground";
 import AuthCard from "../_components/AuthCard";
 import AuthInput from "../_components/AuthInput";
@@ -22,7 +22,9 @@ export default function SignInPage() {
     setError(null);
     setSuccess(null);
     try {
-      const { data, error: err } = await supabase.auth.signInWithPassword({ email, password });
+      const { data, error: err } = await withRetry(() =>
+        supabase.auth.signInWithPassword({ email, password })
+      );
       if (err) throw new Error(err.message);
       if (!data.session?.access_token) throw new Error("Unable to sign in. Please try again.");
       setSuccess("Signed in successfully. Redirecting…");
@@ -38,10 +40,12 @@ export default function SignInPage() {
     setGoogleLoading(true);
     setError(null);
     try {
-      const { data, error: err } = await supabase.auth.signInWithOAuth({
-        provider: "google",
-        options: { redirectTo: `${window.location.origin}/` },
-      });
+      const { data, error: err } = await withRetry(() =>
+        supabase.auth.signInWithOAuth({
+          provider: "google",
+          options: { redirectTo: `${window.location.origin}/` },
+        })
+      );
       if (err) throw new Error(err.message);
       if (data?.url) window.location.assign(data.url);
     } catch (err) {

@@ -36,10 +36,22 @@ class Incident(Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     sector: Mapped[str | None] = mapped_column(String(50), nullable=True)
     severity: Mapped[IncidentSeverity] = mapped_column(
-        Enum(IncidentSeverity), default=IncidentSeverity.MEDIUM
+        Enum(
+            IncidentSeverity,
+            values_callable=lambda enum: [member.value for member in enum],
+            native_enum=False,
+            length=20,
+        ),
+        default=IncidentSeverity.MEDIUM,
     )
     status: Mapped[IncidentStatus] = mapped_column(
-        Enum(IncidentStatus), default=IncidentStatus.OPEN
+        Enum(
+            IncidentStatus,
+            values_callable=lambda enum: [member.value for member in enum],
+            native_enum=False,
+            length=20,
+        ),
+        default=IncidentStatus.OPEN,
     )
     occurred_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

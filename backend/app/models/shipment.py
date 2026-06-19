@@ -32,7 +32,13 @@ class Shipment(Base):
     origin: Mapped[str] = mapped_column(String(255))
     destination: Mapped[str] = mapped_column(String(255))
     status: Mapped[ShipmentStatus] = mapped_column(
-        Enum(ShipmentStatus), default=ShipmentStatus.IN_TRANSIT
+        Enum(
+            ShipmentStatus,
+            values_callable=lambda enum: [member.value for member in enum],
+            native_enum=False,
+            length=50,
+        ),
+        default=ShipmentStatus.IN_TRANSIT,
     )
     agent_id: Mapped[str | None] = mapped_column(
         UUID(as_uuid=False), ForeignKey("agents.id"), nullable=True

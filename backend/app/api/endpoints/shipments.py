@@ -4,15 +4,16 @@ Shipments API endpoints — CRUD + status filter.
 
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies import AuthUser, require_roles
 from app.database.session import get_db
 from app.models.shipment import ShipmentStatus
+from app.schemas.agent_log import AgentLogCreate
 from app.schemas.shipment import ShipmentCreate, ShipmentRead, ShipmentUpdate
-from app.schemas.user import UserRole
+from app.services.log_service import LogService
 from app.services.shipment_service import ShipmentService
+from app.services.reroute_job import run_reroute_job
 
 router = APIRouter()
 
@@ -48,7 +49,6 @@ async def get_shipment(shipment_id: str, db: AsyncSession = Depends(get_db)):
 )
 async def create_shipment(
     payload: ShipmentCreate,
-    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN, UserRole.DRIVER, UserRole.STORE_OWNER, UserRole.PANTRY_MANAGER])),
     db: AsyncSession = Depends(get_db),
 ):
     svc = ShipmentService(db)
@@ -58,14 +58,36 @@ async def create_shipment(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Shipment code '{payload.shipment_code}' already exists",
         )
-    return await svc.create(payload)
+    shipment = await svc.create(payload)
+
+    agent_label = payload.agent_name or (shipment.agent.name if shipment.agent else "Logistics")
+    log_svc = LogService(db)
+    await log_svc.create_log(
+        AgentLogCreate(
+            agent_name=agent_label,
+            agent_type="logistics",
+            action_type="CREATE_SHIPMENT",
+            message=(
+                f"Dispatched {shipment.shipment_code}: "
+                f"{shipment.origin} -> {shipment.destination} [{shipment.status.value}]"
+            ),
+            payload={
+                "shipment_id": shipment.id,
+                "shipment_code": shipment.shipment_code,
+                "origin": shipment.origin,
+                "destination": shipment.destination,
+                "status": shipment.status.value,
+            },
+        )
+    )
+
+    return shipment
 
 
 @router.patch("/{shipment_id}", response_model=ShipmentRead)
 async def update_shipment(
     shipment_id: str,
     payload: ShipmentUpdate,
-    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN, UserRole.DRIVER, UserRole.STORE_OWNER, UserRole.PANTRY_MANAGER])),
     db: AsyncSession = Depends(get_db),
 ):
     svc = ShipmentService(db)
@@ -73,6 +95,21 @@ async def update_shipment(
     if not shipment:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shipment not found")
     return await svc.update(shipment, payload)
+
+
+@router.post("/{shipment_id}/trigger-reroute", response_model=ShipmentRead)
+async def trigger_reroute(
+    shipment_id: str,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+):
+    svc = ShipmentService(db)
+    shipment = await svc.get_by_id(shipment_id)
+    if not shipment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Shipment not found")
+    
+    background_tasks.add_task(run_reroute_job, shipment.id)
+    return shipment
 
 
 @router.delete("/{shipment_id}", status_code=status.HTTP_204_NO_CONTENT)

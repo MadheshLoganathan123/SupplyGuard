@@ -8,6 +8,7 @@ from typing import Optional
 from pydantic import BaseModel, ConfigDict
 
 from app.models.shipment import ShipmentStatus
+from app.schemas.agent import AgentRead
 
 
 class ShipmentBase(BaseModel):
@@ -19,6 +20,7 @@ class ShipmentBase(BaseModel):
 
 class ShipmentCreate(ShipmentBase):
     shipment_code: str
+    agent_name: Optional[str] = None
 
 
 class ShipmentUpdate(BaseModel):
@@ -35,3 +37,4 @@ class ShipmentRead(ShipmentBase):
     shipment_code: str
     created_at: datetime
     updated_at: datetime
+    agent: Optional[AgentRead] = None

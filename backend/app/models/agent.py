@@ -33,9 +33,22 @@ class Agent(Base):
         UUID(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
     )
     name: Mapped[str] = mapped_column(String(100), unique=True, index=True)
-    agent_type: Mapped[AgentType] = mapped_column(Enum(AgentType))
+    agent_type: Mapped[AgentType] = mapped_column(
+        Enum(
+            AgentType,
+            values_callable=lambda enum: [member.value for member in enum],
+            native_enum=False,
+            length=50,
+        )
+    )
     status: Mapped[AgentStatus] = mapped_column(
-        Enum(AgentStatus), default=AgentStatus.IDLE
+        Enum(
+            AgentStatus,
+            values_callable=lambda enum: [member.value for member in enum],
+            native_enum=False,
+            length=50,
+        ),
+        default=AgentStatus.IDLE,
     )
     sector: Mapped[str | None] = mapped_column(String(50), nullable=True)
     efficiency_score: Mapped[float] = mapped_column(default=0.0)

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useState } from "react";
-import { supabase } from "../../../lib/supabaseClient";
+import { supabase, withRetry } from "../../../lib/supabaseClient";
 import AuthBackground from "../_components/AuthBackground";
 import AuthCard from "../_components/AuthCard";
 import AuthInput from "../_components/AuthInput";
@@ -47,11 +47,13 @@ export default function SignUpPage() {
     setError(null);
     setSuccess(null);
     try {
-      const { error: err } = await supabase.auth.signUp({
-        email,
-        password,
-        options: { data: { full_name: fullName, role } },
-      });
+      const { error: err } = await withRetry(() =>
+        supabase.auth.signUp({
+          email,
+          password,
+          options: { data: { full_name: fullName, role } },
+        })
+      );
       if (err) throw new Error(err.message);
       setSuccess("Account created! Check your email to confirm, then sign in.");
     } catch (err) {
@@ -65,10 +67,12 @@ export default function SignUpPage() {
     setGoogleLoading(true);
     setError(null);
     try {
-      const { data, error: err } = await supabase.auth.signInWithOAuth({
-        provider: "google",
-        options: { redirectTo: `${window.location.origin}/` },
-      });
+      const { data, error: err } = await withRetry(() =>
+        supabase.auth.signInWithOAuth({
+          provider: "google",
+          options: { redirectTo: `${window.location.origin}/` },
+        })
+      );
       if (err) throw new Error(err.message);
       if (data?.url) window.location.assign(data.url);
     } catch (err) {

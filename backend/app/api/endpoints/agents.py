@@ -9,7 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.session import get_db
 from app.schemas.agent import AgentCreate, AgentRead, AgentUpdate
+from app.schemas.reports import AgentPerformanceRead
 from app.services.agent_service import AgentService
+from app.services.reporting_service import ReportingService
 
 router = APIRouter()
 
@@ -25,6 +27,14 @@ async def list_agents(
     if active_only:
         return await svc.get_active()
     return await svc.get_all(skip=skip, limit=limit)
+
+
+@router.get("/{agent_id}/performance", response_model=AgentPerformanceRead)
+async def get_agent_performance(agent_id: str, db: AsyncSession = Depends(get_db)):
+    perf = await ReportingService(db).get_agent_performance(agent_id)
+    if not perf:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found")
+    return perf
 
 
 @router.get("/{agent_id}", response_model=AgentRead)

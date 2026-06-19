@@ -1,81 +1,145 @@
-"""
-ProfileService — manage user profiles across all roles.
+"""Profile service backed by Supabase tables."""
 
-Provides:
-- Base profile CRUD (user_profiles table)
-- Role-specific profile management (farmer_profiles, driver_profiles, etc.)
-- Discovery queries for agents (find farmers by crop, drivers by location, stores by category)
-- Profile enrichment with trust scores and metadata
-"""
-
-from typing import Any, Dict, List, Optional
+from math import asin, cos, radians, sin, sqrt
+from typing import Any, Dict, Iterable, List, Optional
 from uuid import UUID
+
+from app.database.supabase_client import supabase_admin
+
+
+ROLE_TABLES = {
+    "farmer": "farmer_profiles",
+    "driver": "driver_profiles",
+    "store_owner": "store_profiles",
+    "pantry_manager": "pantry_profiles",
+    "admin": "admin_profiles",
+}
+
+ROLE_ALIASES = {
+    "admin": "admin",
+    "farmer": "farmer",
+    "driver": "driver",
+    "store owner": "store_owner",
+    "store_owner": "store_owner",
+    "store_manager": "store_owner",
+    "pantry manager": "pantry_manager",
+    "pantry_manager": "pantry_manager",
+    "viewer": "viewer",
+}
 
 
 class ProfileService:
-    """Service for managing and querying user profiles across all roles."""
+    """Service for CRUD and discovery across user and role-specific profiles."""
 
-    def __init__(self, db_session: Any) -> None:
-        """Initialize with a database session."""
+    def __init__(self, db_session: Any = None) -> None:
         self.db = db_session
+        self.client = supabase_admin
 
-    async def get_base_profile(self, user_id: UUID) -> Optional[Dict[str, Any]]:
-        """Fetch base profile (user_profiles table) for a given user_id."""
-        # In production: query user_profiles table
-        # SELECT * FROM public.user_profiles WHERE auth_id = user_id
-        pass
+    @staticmethod
+    def normalize_role(role: Any) -> str:
+        raw = getattr(role, "value", role)
+        key = str(raw or "viewer").strip().lower().replace("-", "_")
+        key = key.replace("_", " ")
+        return ROLE_ALIASES.get(key, key.replace(" ", "_"))
 
-    async def get_farmer_profile(self, user_id: UUID) -> Optional[Dict[str, Any]]:
-        """Fetch farmer-specific profile data."""
-        # SELECT * FROM public.farmer_profiles WHERE auth_id = user_id
-        pass
+    @staticmethod
+    def _clean_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+        return {key: value for key, value in payload.items() if value is not None}
 
-    async def get_driver_profile(self, user_id: UUID) -> Optional[Dict[str, Any]]:
-        """Fetch driver-specific profile data."""
-        # SELECT * FROM public.driver_profiles WHERE auth_id = user_id
-        pass
+    @staticmethod
+    def _one(result: Any) -> Optional[Dict[str, Any]]:
+        data = getattr(result, "data", None)
+        if isinstance(data, list):
+            return data[0] if data else None
+        return data
 
-    async def get_store_profile(self, user_id: UUID) -> Optional[Dict[str, Any]]:
-        """Fetch store owner-specific profile data."""
-        # SELECT * FROM public.store_profiles WHERE auth_id = user_id
-        pass
+    @staticmethod
+    def _many(result: Any) -> List[Dict[str, Any]]:
+        data = getattr(result, "data", None)
+        if data is None:
+            return []
+        return data if isinstance(data, list) else [data]
 
-    async def get_pantry_profile(self, user_id: UUID) -> Optional[Dict[str, Any]]:
-        """Fetch pantry manager-specific profile data."""
-        # SELECT * FROM public.pantry_profiles WHERE auth_id = user_id
-        pass
+    @staticmethod
+    def _contains_any(values: Any, candidates: Optional[Iterable[str]]) -> bool:
+        if not candidates:
+            return True
+        source = {str(value).strip().lower() for value in (values or [])}
+        wanted = {str(value).strip().lower() for value in candidates if value}
+        return bool(source & wanted)
 
-    async def get_admin_profile(self, user_id: UUID) -> Optional[Dict[str, Any]]:
-        """Fetch admin-specific profile data."""
-        # SELECT * FROM public.admin_profiles WHERE auth_id = user_id
-        pass
+    @staticmethod
+    def _distance_km(a_lat: Any, a_lng: Any, b_lat: float, b_lng: float) -> Optional[float]:
+        if a_lat is None or a_lng is None:
+            return None
+        lat1, lng1, lat2, lng2 = map(radians, [float(a_lat), float(a_lng), b_lat, b_lng])
+        dlat = lat2 - lat1
+        dlng = lng2 - lng1
+        h = sin(dlat / 2) ** 2 + cos(lat1) * cos(lat2) * sin(dlng / 2) ** 2
+        return 6371.0 * 2 * asin(sqrt(h))
 
-    async def get_full_profile(self, user_id: UUID) -> Optional[Dict[str, Any]]:
-        """Fetch combined base + role-specific profile for a user."""
+    def _select_by_auth_id(self, table: str, user_id: UUID | str) -> Optional[Dict[str, Any]]:
+        result = self.client.table(table).select("*").eq("auth_id", str(user_id)).maybe_single().execute()
+        return self._one(result)
+
+    def _upsert_by_auth_id(self, table: str, user_id: UUID | str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        clean = self._clean_payload({"auth_id": str(user_id), **payload})
+        result = self.client.table(table).upsert(clean, on_conflict="auth_id").execute()
+        row = self._one(result)
+        if row is None:
+            row = self._select_by_auth_id(table, user_id)
+        return row or clean
+
+    async def get_base_profile(self, user_id: UUID | str) -> Optional[Dict[str, Any]]:
+        return self._select_by_auth_id("user_profiles", user_id)
+
+    async def update_base_profile(self, user_id: UUID | str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._upsert_by_auth_id("user_profiles", user_id, payload)
+
+    async def get_farmer_profile(self, user_id: UUID | str) -> Optional[Dict[str, Any]]:
+        return self._select_by_auth_id("farmer_profiles", user_id)
+
+    async def get_driver_profile(self, user_id: UUID | str) -> Optional[Dict[str, Any]]:
+        return self._select_by_auth_id("driver_profiles", user_id)
+
+    async def get_store_profile(self, user_id: UUID | str) -> Optional[Dict[str, Any]]:
+        return self._select_by_auth_id("store_profiles", user_id)
+
+    async def get_pantry_profile(self, user_id: UUID | str) -> Optional[Dict[str, Any]]:
+        return self._select_by_auth_id("pantry_profiles", user_id)
+
+    async def get_admin_profile(self, user_id: UUID | str) -> Optional[Dict[str, Any]]:
+        return self._select_by_auth_id("admin_profiles", user_id)
+
+    async def get_role_profile(self, role: str, user_id: UUID | str) -> Optional[Dict[str, Any]]:
+        table = ROLE_TABLES.get(self.normalize_role(role))
+        return self._select_by_auth_id(table, user_id) if table else None
+
+    async def update_role_profile(self, role: str, user_id: UUID | str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        table = ROLE_TABLES.get(self.normalize_role(role))
+        if not table:
+            raise ValueError(f"Role {role!r} does not have a role-specific profile table")
+        row = self._upsert_by_auth_id(table, user_id, payload)
+        self.client.table("user_profiles").update({"profile_complete": True}).eq("auth_id", str(user_id)).execute()
+        return row
+
+    async def get_full_profile(self, user_id: UUID | str) -> Optional[Dict[str, Any]]:
         base = await self.get_base_profile(user_id)
         if not base:
             return None
+        role_data = await self.get_role_profile(base.get("role", "viewer"), user_id)
+        return {"base": base, "role_specific": role_data or {}}
 
-        role = base.get("role", "viewer")
-        role_data = None
+    def _base_profile_map(self, auth_ids: Iterable[str]) -> Dict[str, Dict[str, Any]]:
+        ids = [str(auth_id) for auth_id in auth_ids if auth_id]
+        if not ids:
+            return {}
+        result = self.client.table("user_profiles").select("*").in_("auth_id", ids).execute()
+        return {str(row["auth_id"]): row for row in self._many(result)}
 
-        if role == "farmer":
-            role_data = await self.get_farmer_profile(user_id)
-        elif role == "driver":
-            role_data = await self.get_driver_profile(user_id)
-        elif role == "store_owner":
-            role_data = await self.get_store_profile(user_id)
-        elif role == "pantry_manager":
-            role_data = await self.get_pantry_profile(user_id)
-        elif role == "admin":
-            role_data = await self.get_admin_profile(user_id)
-
-        return {
-            "base": base,
-            "role_specific": role_data,
-        }
-
-    # Agent discovery queries
+    def _join_base_profiles(self, rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        profiles = self._base_profile_map(row.get("auth_id") for row in rows)
+        return [{**row, "user_profile": profiles.get(str(row.get("auth_id")), {})} for row in rows]
 
     async def discover_farmers(
         self,
@@ -86,20 +150,25 @@ class ProfileService:
         trust_score_threshold: Optional[float] = None,
         can_self_deliver: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
-        """Discover farmers matching criteria.
-        
-        In production: query farmer_profiles with filters:
-        - crops_produced contains any of crop_types
-        - available_quantity >= min_quantity_kg
-        - distance(latitude, longitude, location) <= radius_km
-        - can_self_deliver = true/false
-        Then join with user_profiles to filter by trust_score.
-        """
-        # SELECT fp.*, up.full_name, up.phone, up.trust_score
-        # FROM farmer_profiles fp
-        # JOIN user_profiles up ON fp.auth_id = up.auth_id
-        # WHERE ...
-        pass
+        rows = self._many(self.client.table("farmer_profiles").select("*").execute())
+        matches = []
+        for row in self._join_base_profiles(rows):
+            base = row.get("user_profile", {})
+            distance = None
+            if location and radius_km is not None:
+                distance = self._distance_km(base.get("latitude"), base.get("longitude"), *location)
+                if distance is None or distance > radius_km:
+                    continue
+            if not self._contains_any(row.get("crops_produced"), crop_types):
+                continue
+            if min_quantity_kg is not None and float(row.get("available_quantity") or 0) < min_quantity_kg:
+                continue
+            if trust_score_threshold is not None and float(base.get("trust_score") or 0) < trust_score_threshold:
+                continue
+            if can_self_deliver is not None and row.get("can_self_deliver") is not can_self_deliver:
+                continue
+            matches.append({**row, "distance_km": distance})
+        return matches
 
     async def discover_drivers(
         self,
@@ -111,20 +180,28 @@ class ProfileService:
         flood_zone_capable: Optional[bool] = None,
         emergency_ready: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
-        """Discover drivers matching criteria.
-        
-        In production: query driver_profiles with filters:
-        - vehicle_type in vehicle_types
-        - max_load_kg >= min_capacity_kg
-        - operating_radius_km >= distance from location
-        - availability_status = 'online'
-        - night_delivery_allowed, flood_zone_access flags
-        """
-        # SELECT dp.*, up.full_name, up.phone, up.availability_status, up.trust_score
-        # FROM driver_profiles dp
-        # JOIN user_profiles up ON dp.auth_id = up.auth_id
-        # WHERE ...
-        pass
+        rows = self._many(self.client.table("driver_profiles").select("*").execute())
+        matches = []
+        for row in self._join_base_profiles(rows):
+            distance = None
+            if location and max_radius_km is not None:
+                distance = self._distance_km(row.get("current_latitude"), row.get("current_longitude"), *location)
+                if distance is None or distance > max_radius_km:
+                    continue
+                if row.get("operating_radius_km") and distance > float(row["operating_radius_km"]):
+                    continue
+            if vehicle_types and str(row.get("vehicle_type", "")).lower() not in {v.lower() for v in vehicle_types}:
+                continue
+            if min_capacity_kg is not None and float(row.get("max_load_kg") or 0) < min_capacity_kg:
+                continue
+            if night_delivery is not None and row.get("night_delivery_allowed") is not night_delivery:
+                continue
+            if flood_zone_capable is not None and row.get("flood_zone_access") is not flood_zone_capable:
+                continue
+            if emergency_ready is not None and row.get("emergency_ready") is not emergency_ready:
+                continue
+            matches.append({**row, "distance_km": distance})
+        return matches
 
     async def discover_stores(
         self,
@@ -135,20 +212,26 @@ class ProfileService:
         cold_storage_required: Optional[bool] = None,
         accepts_emergency: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
-        """Discover stores matching criteria.
-        
-        In production: query store_profiles with filters:
-        - inventory_categories overlaps with requested categories
-        - distance(latitude, longitude, location) <= radius_km
-        - average_daily_demand >= min_daily_demand
-        - has cold storage if required
-        - accepts_emergency_deliveries = true if needed
-        """
-        # SELECT sp.*, up.full_name, up.phone, up.address, up.latitude, up.longitude
-        # FROM store_profiles sp
-        # JOIN user_profiles up ON sp.auth_id = up.auth_id
-        # WHERE ...
-        pass
+        rows = self._many(self.client.table("store_profiles").select("*").execute())
+        matches = []
+        for row in self._join_base_profiles(rows):
+            distance = None
+            lat = row.get("latitude") or row.get("user_profile", {}).get("latitude")
+            lng = row.get("longitude") or row.get("user_profile", {}).get("longitude")
+            if location and radius_km is not None:
+                distance = self._distance_km(lat, lng, *location)
+                if distance is None or distance > radius_km:
+                    continue
+            if not self._contains_any(row.get("inventory_categories"), inventory_categories):
+                continue
+            if min_daily_demand is not None and int(row.get("average_daily_demand") or 0) < min_daily_demand:
+                continue
+            if cold_storage_required and not row.get("cold_storage_capacity"):
+                continue
+            if accepts_emergency is not None and row.get("accepts_emergency_deliveries") is not accepts_emergency:
+                continue
+            matches.append({**row, "distance_km": distance})
+        return matches
 
     async def discover_pantries(
         self,
@@ -157,46 +240,32 @@ class ProfileService:
         location: Optional[tuple[float, float]] = None,
         radius_km: Optional[float] = None,
     ) -> List[Dict[str, Any]]:
-        """Discover pantries matching criteria.
-        
-        In production: query pantry_profiles with filters:
-        - food_requirements overlaps with categories
-        - families_served >= min_families_served
-        - distribution_radius_km >= distance from location
-        """
-        # SELECT pp.*, up.full_name, up.phone, up.address, up.latitude, up.longitude
-        # FROM pantry_profiles pp
-        # JOIN user_profiles up ON pp.auth_id = up.auth_id
-        # WHERE ...
-        pass
-
-    # Batch enrichment for agents
+        rows = self._many(self.client.table("pantry_profiles").select("*").execute())
+        matches = []
+        for row in self._join_base_profiles(rows):
+            distance = None
+            base = row.get("user_profile", {})
+            if location and radius_km is not None:
+                distance = self._distance_km(base.get("latitude"), base.get("longitude"), *location)
+                if distance is None or distance > radius_km:
+                    continue
+            if not self._contains_any(row.get("food_requirements"), food_categories):
+                continue
+            if min_families_served is not None and int(row.get("families_served") or 0) < min_families_served:
+                continue
+            matches.append({**row, "distance_km": distance})
+        return matches
 
     async def enrich_shipment_with_profiles(self, shipment: Dict[str, Any]) -> Dict[str, Any]:
-        """Enrich a shipment record with origin and destination profile data."""
-        # Fetch user profiles for origin and destination users
-        # Add their location, availability, and role info to shipment metadata
         return shipment
 
     async def enrich_incident_with_profiles(self, incident: Dict[str, Any]) -> Dict[str, Any]:
-        """Enrich an incident record with reporter and responder profile data."""
         return incident
 
-    async def compute_matching_score(
-        self,
-        farmer: Dict[str, Any],
-        store: Dict[str, Any],
-    ) -> float:
-        """Compute a matching score between a farmer and store.
-        
-        Factors:
-        - Crop overlap (farmer crops_produced vs store inventory_categories)
-        - Distance (farm location to store)
-        - Quantity match (farmer available_quantity vs store daily_demand)
-        - Trust score (farmer trust_score)
-        - Logistics compatibility (delivery capability, cold storage)
-        
-        Returns: float in [0, 1]
-        """
-        # In production: compute weighted matching score
-        return 0.85
+    async def compute_matching_score(self, farmer: Dict[str, Any], store: Dict[str, Any]) -> float:
+        farmer_crops = set(farmer.get("crops_produced") or [])
+        store_categories = set(store.get("inventory_categories") or [])
+        overlap = 1.0 if farmer_crops & store_categories else 0.4
+        quantity = min(float(farmer.get("available_quantity") or 0) / max(float(store.get("average_daily_demand") or 1), 1), 1)
+        trust = min(float(farmer.get("user_profile", {}).get("trust_score") or 0) / 100, 1)
+        return round((overlap * 0.45) + (quantity * 0.35) + (trust * 0.20), 3)

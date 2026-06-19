@@ -1,15 +1,21 @@
 "use client";
 
-import Image from "next/image";
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { supabase } from "../../lib/supabaseClient";
 
 interface Shipment {
-  id: string;
+  id: string;          // shipment_code displayed in the table
+  _dbId: string;       // actual UUID from DB used for API calls
   origin: string;
   destination: string;
-  status: "IN-TRANSIT" | "REROUTED" | "PERIMETER DROP";
+  status: "IN-TRANSIT" | "REROUTED" | "PERIMETER DROP" | "DELIVERED" | "DELAYED";
   agent: string;
 }
+
+const BACKEND_URL = (() => {
+  const configured = (process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000").replace(/\/+$/, "");
+  return configured.endsWith("/api/v1") ? configured : `${configured}/api/v1`;
+})();
 
 interface Path {
   name: string;
@@ -19,21 +25,74 @@ interface Path {
   color: "primary" | "secondary";
 }
 
-const initialShipments: Shipment[] = [
-  { id: "#SS-4921", origin: "Valley Farms Hub", destination: "Midtown Pantry", status: "IN-TRANSIT", agent: "Unit: 49-Alpha" },
-  { id: "#SS-4922", origin: "Central Wholesale", destination: "Independent Grocer 4", status: "REROUTED", agent: "Logi-Truck-9" },
-  { id: "#SS-4925", origin: "Vertical Fields G3", destination: "Perimeter Drop-A", status: "PERIMETER DROP", agent: "Gig-X71" },
-  { id: "#SS-4928", origin: "Hydro-Collective", destination: "Pantry Hub South", status: "IN-TRANSIT", agent: "Cycle-Unit-12" },
-];
-
-const initialPaths: Path[] = [
-  { name: "PATH A: EXPRESS", dist: "8.2km", desc: "Prioritizes speed via Perimeter Bypass.", efficiency: 85, color: "primary" },
-  { name: "PATH B: SECURE", dist: "12.4km", desc: "Maximum threat avoidance. 0 risk.", efficiency: 98, color: "secondary" },
+const STATIC_PATHS: Path[] = [
+  { name: 'PATH A: EXPRESS', dist: '8.2km', desc: 'Prioritizes speed via Perimeter Bypass.', efficiency: 85, color: 'primary' },
+  { name: 'PATH B: SECURE', dist: '12.4km', desc: 'Maximum threat avoidance. 0 risk zone.', efficiency: 98, color: 'secondary' },
 ];
 
 export default function Logistics() {
-  const [shipments, setShipments] = useState<Shipment[]>(initialShipments);
-  const [paths, setPaths] = useState<Path[]>(initialPaths);
+  const [shipments, setShipments] = useState<Shipment[]>([]);
+  const [paths, setPaths] = useState<Path[]>(STATIC_PATHS);
+  const [agents, setAgents] = useState<string[]>([]);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const loadShipments = useCallback(async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/shipments/?limit=50`, {
+        method: "GET",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (!res.ok) {
+        console.error("Logistics API error:", await res.text());
+        return;
+      }
+
+      const data = await res.json();
+      setShipments((data ?? []).map((s: Record<string, unknown>) => ({
+        id: (s.shipment_code as string) || (s.id as string),
+        _dbId: s.id as string,
+        origin: s.origin as string,
+        destination: s.destination as string,
+        status: s.status as Shipment["status"],
+        agent: (s.agent as { name?: string } | null)?.name || "Unassigned",
+      })));
+    } catch (err) {
+      console.error("Failed to load shipments:", err);
+    }
+  }, []);
+
+  const loadAgents = useCallback(async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/agents/?limit=100`);
+      if (res.ok) {
+        const data = await res.json();
+        setAgents((data ?? []).map((a: { name: string }) => a.name));
+      }
+    } catch (err) {
+      console.warn("Failed to load agents:", err);
+    }
+  }, []);
+
+  useEffect(() => {
+    void Promise.resolve().then(() => {
+      void loadShipments();
+      void loadAgents();
+    });
+
+    // Supabase Realtime Subscription
+    const channel = supabase
+      .channel('shipments-realtime')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shipments' }, () => {
+        loadShipments();
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [loadShipments, loadAgents]);
   const [simulating, setSimulating] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
 
@@ -43,38 +102,149 @@ export default function Logistics() {
   const [newAgent, setNewAgent] = useState("");
   const [newStatus, setNewStatus] = useState<Shipment["status"]>("IN-TRANSIT");
 
-  const handleSimulateNew = () => {
-    if (simulating) return;
-    setSimulating(true);
-    setTimeout(() => {
-      const letters = "CDEFGHIJKLMNOP";
-      const newPath: Path = {
-        name: `PATH ${letters[paths.length - 2]}: DYNAMIC`,
-        dist: `${(Math.random() * 8 + 5).toFixed(1)}km`,
-        desc: "AI computed alternate route via secondary grid lanes.",
-        efficiency: Math.floor(Math.random() * 15 + 82),
-        color: "primary",
-      };
-      setPaths((prev) => [...prev, newPath]);
-      setSimulating(false);
-    }, 1500);
+  const getAuthHeaders = async () => {
+    const { data, error } = await supabase.auth.getSession();
+    const headers: Record<string, string> = {
+      "Content-Type": "application/json",
+    };
+    if (error) {
+      console.warn("Unable to get session token:", error.message);
+      return headers;
+    }
+    const token = data?.session?.access_token;
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+    return headers;
   };
 
-  const handleAddShipment = (e: React.FormEvent) => {
+  const parseAgentId = (candidate: string) => {
+    const uuidRegex = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+    return uuidRegex.test(candidate.trim()) ? candidate.trim() : undefined;
+  };
+
+  const handleSimulateNew = async () => {
+    if (simulating) return;
+    setSimulating(true);
+    try {
+      const res = await fetch(`${BACKEND_URL}/routing/ai/reroute`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ area: "Sector 12" }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setPaths((prev) => [...prev, ...data.paths]);
+      }
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setSimulating(false);
+    }
+  };
+
+  const handleAddShipment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newOrigin || !newDest || !newAgent) return;
-    setShipments((prev) => [
-      {
-        id: `#SS-${Math.floor(Math.random() * 9000 + 1000)}`,
-        origin: newOrigin,
-        destination: newDest,
-        status: newStatus,
-        agent: newAgent,
-      },
-      ...prev,
-    ]);
-    setIsModalOpen(false);
-    setNewOrigin(""); setNewDest(""); setNewAgent("");
+
+    setSubmitError(null);
+    setIsSubmitting(true);
+
+    const payload: Record<string, unknown> = {
+      shipment_code: `#SS-${Math.floor(Math.random() * 9000 + 1000)}`,
+      origin: newOrigin,
+      destination: newDest,
+      status: newStatus,
+      agent_name: newAgent.trim(),
+    };
+
+    const agentId = parseAgentId(newAgent);
+    if (agentId) {
+      payload.agent_id = agentId;
+      delete payload.agent_name;
+    }
+
+    const headers = await getAuthHeaders();
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/shipments/`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        setIsModalOpen(false);
+        setNewOrigin("");
+        setNewDest("");
+        setNewAgent("");
+        await loadShipments();
+        return;
+      }
+
+      const errText = await res.text();
+      if (res.status === 401) {
+        console.warn("Backend auth required, falling back to direct Supabase insert.");
+      } else {
+        setSubmitError(errText || `Failed to create shipment (${res.status})`);
+        return;
+      }
+    } catch (err) {
+      console.error("Shipment creation failed:", err);
+      setSubmitError("Could not reach backend. Trying Supabase fallback...");
+    } finally {
+      setIsSubmitting(false);
+    }
+
+    const { error } = await supabase.from('shipments').insert({
+      shipment_code: payload.shipment_code,
+      origin: payload.origin,
+      destination: payload.destination,
+      status: payload.status,
+      agent_id: agentId ?? null,
+    });
+
+    if (error) {
+      setSubmitError(error.message);
+    } else {
+      setIsModalOpen(false);
+      setNewOrigin('');
+      setNewDest('');
+      setNewAgent('');
+      await loadShipments();
+    }
+  };
+
+  const handleTriggerReroute = async (dbId: string) => {
+    const headers = await getAuthHeaders();
+    let success = false;
+
+    try {
+      const res = await fetch(`${BACKEND_URL}/shipments/${dbId}/trigger-reroute`, {
+        method: "POST",
+        headers,
+      });
+
+      if (res.ok) {
+        success = true;
+      } else {
+        console.warn("Reroute API returned", res.status, await res.text());
+      }
+    } catch (err) {
+      console.error('Reroute API error:', err);
+    }
+
+    if (!success) {
+      const { error } = await supabase
+        .from('shipments')
+        .update({ status: 'REROUTED' })
+        .eq('id', dbId);
+      if (error) {
+        console.error('Reroute fallback failed:', error.message);
+      }
+    }
+
+    loadShipments();
   };
 
   const statusStyle = (s: Shipment["status"]) => {
@@ -184,12 +354,12 @@ export default function Logistics() {
           <div className="flex-1 min-h-[180px] bg-surface-container border border-outline-variant/25 rounded-xl overflow-hidden relative">
             {/* Dark map base */}
             <div className="absolute inset-0 bg-[#0b1326] z-0"></div>
-            <Image
-              fill
-              className="absolute inset-0 object-cover opacity-15 grayscale z-0"
-              alt="Logistics Map"
-              src="/images/map_logistics.jpg"
-              sizes="100vw"
+            <div
+              className="absolute inset-0 opacity-30 z-0"
+              style={{
+                background:
+                  "radial-gradient(circle at 50% 50%, rgba(78,222,163,0.2), transparent 60%), linear-gradient(180deg, #0b1326 0%, #152238 100%)",
+              }}
             />
             {/* Network node SVG */}
             <svg className="absolute inset-0 w-full h-full z-10 pointer-events-none" viewBox="0 0 260 200" preserveAspectRatio="xMidYMid slice">
@@ -336,8 +506,12 @@ export default function Logistics() {
                       </td>
                       <td className="px-md py-[12px] text-[12px] text-on-surface-variant font-mono whitespace-nowrap">{ship.agent}</td>
                       <td className="px-md py-[12px]">
-                        <button className="text-on-surface-variant hover:text-on-surface transition-colors flex items-center justify-center">
-                          <span className="material-symbols-outlined text-[18px]">more_horiz</span>
+                        <button 
+                          onClick={() => handleTriggerReroute(ship._dbId)}
+                          title="Trigger AI Reroute"
+                          className="text-on-surface-variant hover:text-primary transition-colors flex items-center justify-center text-[10px] border border-outline-variant/30 px-2 py-1 rounded font-bold"
+                        >
+                          REROUTE
                         </button>
                       </td>
                     </tr>
@@ -368,61 +542,85 @@ export default function Logistics() {
 
       {/* Add Shipment Modal */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-50 bg-[#0b1326]/70 backdrop-blur-sm flex items-center justify-center p-md animate-in fade-in duration-200">
-          <div className="glass-panel w-full max-w-md bg-surface-container/98 p-lg rounded-xl shadow-2xl border-primary/20 animate-in zoom-in-95 duration-200">
-            <div className="flex justify-between items-start mb-md">
+        <div className="fixed inset-0 z-50 bg-[#0b1326]/80 backdrop-blur-md flex items-center justify-center p-md animate-in fade-in duration-300">
+          <div className="glass-panel w-[440px] max-w-[95vw] p-xl rounded-3xl shadow-[0_0_40px_-10px_rgba(78,222,163,0.3)] border border-primary/20 animate-in zoom-in-95 duration-300 relative overflow-hidden">
+            {/* Decorative background glow */}
+            <div className="absolute top-0 right-0 w-64 h-64 bg-primary/10 blur-3xl rounded-full pointer-events-none -translate-y-1/2 translate-x-1/3"></div>
+            
+            <div className="flex justify-between items-start mb-lg relative z-10">
               <div>
-                <h3 className="text-[17px] font-bold text-primary flex items-center gap-sm">
-                  <span className="material-symbols-outlined text-[20px]">local_shipping</span>
-                  Add New Shipment
+                <h3 className="text-[19px] font-bold text-on-surface flex items-center gap-[8px] leading-tight">
+                  <div className="w-8 h-8 rounded-lg bg-primary/15 flex items-center justify-center">
+                    <span className="material-symbols-outlined text-[18px] text-primary">add_box</span>
+                  </div>
+                  New Shipment
                 </h3>
-                <p className="text-[12px] text-on-surface-variant mt-[3px]">Register dynamic cargo routing in system database.</p>
+                <p className="text-[12px] text-on-surface-variant mt-[6px]">Register dynamic cargo routing in the logistics network.</p>
               </div>
-              <button onClick={() => setIsModalOpen(false)} className="text-on-surface-variant hover:text-on-surface transition-colors">
-                <span className="material-symbols-outlined text-[20px]">close</span>
+              <button onClick={() => setIsModalOpen(false)} className="w-8 h-8 rounded-full bg-surface-container hover:bg-surface-container-high flex items-center justify-center text-on-surface-variant hover:text-on-surface transition-colors">
+                <span className="material-symbols-outlined text-[18px]">close</span>
               </button>
             </div>
-            <form onSubmit={handleAddShipment} className="space-y-md">
+            
+            <form onSubmit={handleAddShipment} className="space-y-md relative z-10">
               {[
-                { label: "Cargo Origin", val: newOrigin, set: setNewOrigin, ph: "e.g. Sector 7 Greenhouse" },
-                { label: "Cargo Destination", val: newDest, set: setNewDest, ph: "e.g. Node Delta Clinic" },
-              ].map(({ label, val, set, ph }) => (
+                { label: "Cargo Origin", val: newOrigin, set: setNewOrigin, ph: "e.g. Sector 7 Greenhouse", icon: "location_on" },
+                { label: "Cargo Destination", val: newDest, set: setNewDest, ph: "e.g. Node Delta Clinic", icon: "flag" },
+              ].map(({ label, val, set, ph, icon }) => (
                 <div key={label}>
-                  <label className="block text-[10px] font-bold text-on-surface-variant uppercase tracking-wider mb-[4px]">{label}</label>
-                  <input
-                    type="text" required placeholder={ph}
-                    className="w-full bg-background border border-outline-variant/30 rounded-lg px-[12px] py-[8px] text-[13px] focus:ring-1 focus:ring-primary focus:border-primary outline-none text-on-surface"
-                    value={val} onChange={(e) => set(e.target.value)}
-                  />
+                  <label className="block text-[10px] font-bold text-on-surface-variant uppercase tracking-widest mb-[6px]">{label}</label>
+                  <div className="relative">
+                    <span className="absolute left-[12px] top-1/2 -translate-y-1/2 material-symbols-outlined text-[18px] text-on-surface-variant/60">{icon}</span>
+                    <input
+                      type="text" required placeholder={ph}
+                      className="w-full bg-surface-container-low border border-outline-variant/30 rounded-xl pl-[38px] pr-[12px] py-[10px] text-[13px] focus:ring-2 focus:ring-primary/50 focus:border-primary outline-none text-on-surface transition-all placeholder:text-on-surface-variant/40"
+                      value={val} onChange={(e) => set(e.target.value)}
+                    />
+                  </div>
                 </div>
               ))}
-              <div className="grid grid-cols-2 gap-sm">
+              <div className="grid grid-cols-2 gap-md">
                 <div>
-                  <label className="block text-[10px] font-bold text-on-surface-variant uppercase tracking-wider mb-[4px]">Assigned Agent</label>
-                  <input
-                    type="text" required placeholder="e.g. Gig-D22"
-                    className="w-full bg-background border border-outline-variant/30 rounded-lg px-[12px] py-[8px] text-[13px] focus:ring-1 focus:ring-primary focus:border-primary outline-none text-on-surface font-mono"
-                    value={newAgent} onChange={(e) => setNewAgent(e.target.value)}
-                  />
+                  <label className="block text-[10px] font-bold text-on-surface-variant uppercase tracking-widest mb-[6px]">Assigned Agent</label>
+                  <div className="relative">
+                    <span className="absolute left-[12px] top-1/2 -translate-y-1/2 material-symbols-outlined text-[18px] text-on-surface-variant/60">smart_toy</span>
+                    <input
+                      type="text" required placeholder="e.g. Gig-D22" list="agent-options"
+                      className="w-full bg-surface-container-low border border-outline-variant/30 rounded-xl pl-[38px] pr-[12px] py-[10px] text-[13px] focus:ring-2 focus:ring-primary/50 focus:border-primary outline-none text-on-surface font-mono transition-all placeholder:text-on-surface-variant/40"
+                      value={newAgent} onChange={(e) => setNewAgent(e.target.value)}
+                    />
+                    <datalist id="agent-options">
+                      {agents.map((name) => (
+                        <option key={name} value={name} />
+                      ))}
+                    </datalist>
+                  </div>
                 </div>
                 <div>
-                  <label className="block text-[10px] font-bold text-on-surface-variant uppercase tracking-wider mb-[4px]">Status</label>
-                  <select
-                    className="w-full bg-background border border-outline-variant/30 rounded-lg px-[10px] py-[8px] text-[13px] focus:ring-1 focus:ring-primary focus:border-primary outline-none text-on-surface font-mono"
-                    value={newStatus} onChange={(e) => setNewStatus(e.target.value as Shipment["status"])}
-                  >
-                    <option value="IN-TRANSIT">IN-TRANSIT</option>
-                    <option value="REROUTED">REROUTED</option>
-                    <option value="PERIMETER DROP">PERIMETER DROP</option>
-                  </select>
+                  <label className="block text-[10px] font-bold text-on-surface-variant uppercase tracking-widest mb-[6px]">Status</label>
+                  <div className="relative">
+                    <select
+                      className="w-full bg-surface-container-low border border-outline-variant/30 rounded-xl pl-[12px] pr-[30px] py-[10px] text-[13px] focus:ring-2 focus:ring-primary/50 focus:border-primary outline-none text-on-surface font-mono transition-all appearance-none cursor-pointer"
+                      value={newStatus} onChange={(e) => setNewStatus(e.target.value as Shipment["status"])}
+                    >
+                      <option value="IN-TRANSIT" className="bg-surface-container text-on-surface">IN-TRANSIT</option>
+                      <option value="REROUTED" className="bg-surface-container text-on-surface">REROUTED</option>
+                      <option value="PERIMETER DROP" className="bg-surface-container text-on-surface">PERIMETER DROP</option>
+                    </select>
+                    <span className="absolute right-[10px] top-1/2 -translate-y-1/2 material-symbols-outlined text-[18px] text-on-surface-variant/60 pointer-events-none">expand_more</span>
+                  </div>
                 </div>
               </div>
+              {submitError && (
+                <p className="text-[12px] text-error font-mono">{submitError}</p>
+              )}
               <button
                 type="submit"
-                className="w-full bg-primary text-on-primary py-[10px] rounded-lg font-bold hover:brightness-110 transition-all flex justify-center items-center gap-xs font-mono text-[11px] uppercase tracking-widest shadow-lg shadow-primary/20"
+                disabled={isSubmitting}
+                className="w-full mt-2 bg-primary text-on-primary py-[12px] rounded-xl font-bold hover:brightness-110 active:scale-[0.98] transition-all flex justify-center items-center gap-[8px] font-mono text-[12px] uppercase tracking-widest shadow-lg shadow-primary/20 disabled:opacity-60"
               >
-                <span className="material-symbols-outlined text-[18px]">add_task</span>
-                Register Shipment
+                <span className="material-symbols-outlined text-[20px]">send</span>
+                {isSubmitting ? "Dispatching..." : "Dispatch Shipment"}
               </button>
             </form>
           </div>

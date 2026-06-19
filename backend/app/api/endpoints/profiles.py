@@ -12,13 +12,45 @@ Routes:
 from typing import Optional, List
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 
 from app.api.dependencies import get_current_user
 from app.services.profile_service import ProfileService
 
 router = APIRouter(prefix="/profiles", tags=["profiles"])
+
+
+def _service() -> ProfileService:
+    return ProfileService()
+
+
+def _payload(model: BaseModel) -> dict:
+    return model.model_dump(exclude_none=True)
+
+
+def _role_value(current_user) -> str:
+    return ProfileService.normalize_role(current_user.role)
+
+
+def _location(lat: Optional[float], lng: Optional[float]) -> Optional[tuple[float, float]]:
+    if lat is None or lng is None:
+        return None
+    return (lat, lng)
+
+
+async def _get_or_create_base_profile(current_user, service: ProfileService) -> dict:
+    profile = await service.get_base_profile(current_user.id)
+    if profile:
+        return profile
+    return await service.update_base_profile(
+        current_user.id,
+        {
+            "email": current_user.email,
+            "full_name": current_user.full_name,
+            "role": _role_value(current_user),
+        },
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -36,6 +68,8 @@ class BaseProfileUpdate(BaseModel):
     emergency_contact_name: Optional[str] = None
     emergency_contact_phone: Optional[str] = None
     emergency_contact_relationship: Optional[str] = None
+    additional_credentials: Optional[str] = None
+    profile_complete: Optional[bool] = None
 
 
 class FarmerProfileUpdate(BaseModel):
@@ -120,16 +154,12 @@ class AdminProfileUpdate(BaseModel):
 @router.get("/me")
 async def get_current_user_profile(current_user = Depends(get_current_user)) -> dict:
     """Fetch the current authenticated user's full profile (base + role-specific)."""
-    # In production: call ProfileService.get_full_profile(current_user.id)
-    return {
-        "user_id": str(current_user.id),
-        "base": {
-            "full_name": current_user.user_metadata.get("full_name"),
-            "email": current_user.email,
-            "role": current_user.user_metadata.get("role", "viewer"),
-        },
-        "role_specific": {},
-    }
+    service = _service()
+    await _get_or_create_base_profile(current_user, service)
+    profile = await service.get_full_profile(current_user.id)
+    if not profile:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+    return {"user_id": str(current_user.id), **profile}
 
 
 @router.get("/{user_id}")
@@ -138,9 +168,12 @@ async def get_user_profile(
     current_user = Depends(get_current_user),
 ) -> dict:
     """Fetch a user's profile. Admin only or same user."""
-    # In production: verify current_user is admin or requesting own profile
-    # then call ProfileService.get_full_profile(user_id)
-    return {}
+    if str(user_id) != str(current_user.id) and _role_value(current_user) != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin role required")
+    profile = await _service().get_full_profile(user_id)
+    if not profile:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
+    return {"user_id": str(user_id), **profile}
 
 
 @router.post("/update-base")
@@ -149,11 +182,16 @@ async def update_base_profile(
     current_user = Depends(get_current_user),
 ) -> dict:
     """Update current user's base profile fields."""
-    # In production:
-    # - Validate payload fields
-    # - Update user_profiles table
-    # - Return updated profile
-    return {}
+    service = _service()
+    base = await _get_or_create_base_profile(current_user, service)
+    update = {
+        **_payload(payload),
+        "email": base.get("email") or current_user.email,
+        "full_name": payload.full_name or base.get("full_name") or current_user.full_name,
+        "role": base.get("role") or _role_value(current_user),
+    }
+    updated = await service.update_base_profile(current_user.id, update)
+    return {"base": updated}
 
 
 @router.post("/farmer/update")
@@ -162,12 +200,7 @@ async def update_farmer_profile(
     current_user = Depends(get_current_user),
 ) -> dict:
     """Update current user's farmer profile. Farmer role only."""
-    # In production:
-    # - Verify role == "farmer"
-    # - Upsert farmer_profiles table
-    # - Update user_profiles.profile_complete flag
-    # - Return updated profile
-    return {}
+    return await _update_role_profile("farmer", payload, current_user)
 
 
 @router.post("/driver/update")
@@ -176,7 +209,7 @@ async def update_driver_profile(
     current_user = Depends(get_current_user),
 ) -> dict:
     """Update current user's driver profile. Driver role only."""
-    return {}
+    return await _update_role_profile("driver", payload, current_user)
 
 
 @router.post("/store/update")
@@ -185,7 +218,7 @@ async def update_store_profile(
     current_user = Depends(get_current_user),
 ) -> dict:
     """Update current user's store profile. Store owner role only."""
-    return {}
+    return await _update_role_profile("store_owner", payload, current_user)
 
 
 @router.post("/pantry/update")
@@ -194,7 +227,7 @@ async def update_pantry_profile(
     current_user = Depends(get_current_user),
 ) -> dict:
     """Update current user's pantry profile. Pantry manager role only."""
-    return {}
+    return await _update_role_profile("pantry_manager", payload, current_user)
 
 
 @router.post("/admin/update")
@@ -203,7 +236,17 @@ async def update_admin_profile(
     current_user = Depends(get_current_user),
 ) -> dict:
     """Update current user's admin profile. Admin role only."""
-    return {}
+    return await _update_role_profile("admin", payload, current_user)
+
+
+async def _update_role_profile(role: str, payload: BaseModel, current_user) -> dict:
+    current_role = _role_value(current_user)
+    if current_role != role and current_role != "admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=f"{role} profile required")
+    service = _service()
+    await _get_or_create_base_profile(current_user, service)
+    updated = await service.update_role_profile(role, current_user.id, _payload(payload))
+    return {"role_specific": updated}
 
 
 @router.get("/discover/farmers")
@@ -218,10 +261,16 @@ async def discover_farmers(
     can_self_deliver: Optional[bool] = Query(None),
 ) -> dict:
     """Discover farmers matching criteria. Used by agents and store owners."""
-    # In production:
-    # - Call ProfileService.discover_farmers(crop_types=..., min_quantity_kg=..., location=..., ...)
-    # - Return list of matching farmer profiles
-    return {"farmers": []}
+    crops = crop_list or ([crop] if crop else None)
+    farmers = await _service().discover_farmers(
+        crop_types=crops,
+        min_quantity_kg=min_quantity_kg,
+        location=_location(location_lat, location_lng),
+        radius_km=radius_km,
+        trust_score_threshold=trust_score_min,
+        can_self_deliver=can_self_deliver,
+    )
+    return {"farmers": farmers}
 
 
 @router.get("/discover/drivers")
@@ -236,7 +285,16 @@ async def discover_drivers(
     emergency_ready: Optional[bool] = Query(None),
 ) -> dict:
     """Discover drivers matching criteria. Used by agents for route optimization."""
-    return {"drivers": []}
+    drivers = await _service().discover_drivers(
+        vehicle_types=[vehicle_type] if vehicle_type else None,
+        min_capacity_kg=min_capacity_kg,
+        location=_location(location_lat, location_lng),
+        max_radius_km=max_radius_km,
+        night_delivery=night_delivery,
+        flood_zone_capable=flood_zone,
+        emergency_ready=emergency_ready,
+    )
+    return {"drivers": drivers}
 
 
 @router.get("/discover/stores")
@@ -251,7 +309,16 @@ async def discover_stores(
     accepts_emergency: Optional[bool] = Query(None),
 ) -> dict:
     """Discover stores matching criteria. Used by agents for sourcing."""
-    return {"stores": []}
+    categories = category_list or ([category] if category else None)
+    stores = await _service().discover_stores(
+        inventory_categories=categories,
+        location=_location(location_lat, location_lng),
+        radius_km=radius_km,
+        min_daily_demand=min_daily_demand,
+        cold_storage_required=cold_storage,
+        accepts_emergency=accepts_emergency,
+    )
+    return {"stores": stores}
 
 
 @router.get("/discover/pantries")
@@ -264,4 +331,11 @@ async def discover_pantries(
     min_families_served: Optional[int] = Query(None),
 ) -> dict:
     """Discover pantries matching criteria. Used by agents for emergency distribution."""
-    return {"pantries": []}
+    categories = category_list or ([category] if category else None)
+    pantries = await _service().discover_pantries(
+        food_categories=categories,
+        min_families_served=min_families_served,
+        location=_location(location_lat, location_lng),
+        radius_km=radius_km,
+    )
+    return {"pantries": pantries}

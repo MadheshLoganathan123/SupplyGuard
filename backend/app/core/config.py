@@ -2,7 +2,8 @@
 Application configuration — reads from .env via pydantic-settings.
 """
 
-from typing import List, Any
+from typing import Any
+from urllib.parse import quote, unquote, urlparse, urlunparse
 
 from pydantic import AnyHttpUrl, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -29,10 +30,10 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = (
-        "postgresql+asyncpg://supplyguard:supplyguard@localhost:5432/supplyguard_db"
+        "postgresql+asyncpg://supplyguard:supplyguard@127.0.0.1:5432/supplyguard_db"
     )
     SYNC_DATABASE_URL: str = (
-        "postgresql+psycopg2://supplyguard:supplyguard@localhost:5432/supplyguard_db"
+        "postgresql+psycopg2://supplyguard:supplyguard@127.0.0.1:5432/supplyguard_db"
     )
 
     # Auth
@@ -73,6 +74,64 @@ class Settings(BaseSettings):
             return list(v)
         except Exception:
             return [str(v)]
+
+    @field_validator("DATABASE_URL", mode="before")
+    @classmethod
+    def normalize_database_url(cls, v: str) -> str:
+        """Ensure async SQLAlchemy uses postgresql+asyncpg driver.
+        
+        If the URL already uses +asyncpg, return it as-is (already correct).
+        Otherwise convert plain postgres:// or postgresql:// to +asyncpg and
+        safely percent-encode any special characters in the password.
+        """
+        if not isinstance(v, str):
+            return v
+        normalized = v.strip().strip('"').strip("'")
+
+        # Already using asyncpg — trust the value as-is, no re-encoding needed
+        if "postgresql+asyncpg" in normalized or "postgres+asyncpg" in normalized:
+            return normalized
+
+        # Handle plain postgres:// / postgresql:// / postgresql+psycopg2://
+        # by re-encoding the password and switching to +asyncpg
+        for prefix in (
+            "postgres://",
+            "postgresql://",
+            "postgresql+psycopg2://",
+            "postgresql+psycopg2cffi://",
+        ):
+            if normalized.startswith(prefix):
+                remainder = normalized[len(prefix):]
+                if "@" in remainder:
+                    userinfo, hostinfo = remainder.rsplit("@", 1)
+                    if ":" in userinfo:
+                        username, password = userinfo.split(":", 1)
+                        # unquote first so we don't double-encode
+                        safe_password = quote(unquote(password), safe="")
+                        normalized = f"postgresql+asyncpg://{username}:{safe_password}@{hostinfo}"
+                        return normalized
+                # No password — just swap scheme
+                return normalized.replace(prefix, "postgresql+asyncpg://", 1)
+
+        return normalized
+
+
+    @field_validator("SYNC_DATABASE_URL", mode="before")
+    @classmethod
+    def normalize_sync_database_url(cls, v: str) -> str:
+        """Ensure Alembic/sync tooling uses psycopg2 driver."""
+        if not isinstance(v, str):
+            return v
+        normalized = v.strip().strip('"').strip("'")
+        if normalized.startswith("postgresql+psycopg2://"):
+            return normalized
+        if normalized.startswith("postgresql+asyncpg://"):
+            return normalized.replace("postgresql+asyncpg://", "postgresql+psycopg2://", 1)
+        if normalized.startswith("postgresql://"):
+            return normalized.replace("postgresql://", "postgresql+psycopg2://", 1)
+        if normalized.startswith("postgres://"):
+            return normalized.replace("postgres://", "postgresql+psycopg2://", 1)
+        return normalized
 
 
 settings = Settings()

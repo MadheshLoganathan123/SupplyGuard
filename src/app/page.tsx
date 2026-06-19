@@ -1,7 +1,7 @@
 "use client";
 
-import Image from "next/image";
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { supabase } from "../lib/supabaseClient";
 
 interface Message {
   agent: string;
@@ -9,74 +9,149 @@ interface Message {
   text: string;
 }
 
-const randomMessages: Message[] = [
-  { agent: "Logistics Agent", color: "text-primary", text: "Rerouting Unit #421 to avoid rising water levels." },
-  { agent: "Sourcing Agent", color: "text-primary-fixed-dim", text: "Alternative supplier found for essential medicine." },
-  { agent: "Recipient Agent", color: "text-secondary", text: "Validation token received for sector delivery." },
-  { agent: "Core AI", color: "text-primary-container", text: "Resource balancing complete for current hour." },
-  { agent: "Logistics Agent", color: "text-primary", text: "Drone swarm route optimized for high wind corridors." },
-  { agent: "Sourcing Agent", color: "text-primary-fixed-dim", text: "Wheat reserves at warehouse Delta checked and certified." }
-];
+const BACKEND_URL = (() => {
+  const configured = (process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000/api/v1").replace(/\/+$/, "");
+  return configured.endsWith("/api/v1") ? configured : `${configured}/api/v1`;
+})();
 
 export default function Dashboard() {
-  // Threat Level State (simulating random noise fluctuation)
-  const [threatLevel, setThreatLevel] = useState(65);
+  const [threatLevel, setThreatLevel] = useState(35);
+  const [threatText, setThreatText] = useState("MODERATE");
+  const [activeDisruptions, setActiveDisruptions] = useState(0);
+  const [supplyMatchPct, setSupplyMatchPct] = useState(0);
+  const [activeUnits, setActiveUnits] = useState(0);
   
   // Negotiation Hub Logs state
-  const [logs, setLogs] = useState<Message[]>([
-    { agent: "Logistics Agent", color: "text-primary", text: "Bypassing Sector 7 via Perimeter Node B." },
-    { agent: "Sourcing Agent", color: "text-primary-fixed-dim", text: "Surplus grains allocated from Warehouse Delta." },
-    { agent: "Recipient Agent", color: "text-secondary", text: "ETA adjustment confirmed. Community notified." },
-    { agent: "Logistics Agent", color: "text-primary", text: "Analyzing secondary blockages in Sector 3..." },
-    { agent: "Core AI", color: "text-primary-container", text: "Calculating optimal re-entry points. Please standby." }
-  ]);
+  const [logs, setLogs] = useState<Message[]>([]);
   
   const [inputValue, setInputValue] = useState("");
   const feedEndRef = useRef<HTMLDivElement>(null);
 
-  // Simulating live telemetry updates
-  useEffect(() => {
-    const logInterval = setInterval(() => {
-      const randomMsg = randomMessages[Math.floor(Math.random() * randomMessages.length)];
-      setLogs(prev => [...prev, randomMsg].slice(-15)); // Cap logs at 15 messages
-    }, 5000);
+  const fetchDashboard = useCallback(async () => {
+    try {
+      const metricsRes = await fetch(`${BACKEND_URL}/dashboard/metrics`);
+      if (metricsRes.ok) {
+        const payload = await metricsRes.json();
+        setThreatText(payload.threatLevel ?? "MODERATE");
+        setActiveDisruptions(payload.activeDisruptions ?? 0);
+        setSupplyMatchPct(payload.supplyMatchPct ?? 94);
+        setActiveUnits(payload.fleetCounts ?? 0);
+        const threatPercent =
+          payload.threatLevel === "CRITICAL" ? 95 :
+          payload.threatLevel === "ELEVATED" ? 65 : 35;
+        setThreatLevel(threatPercent);
+      } else {
+        console.warn("Dashboard metrics unavailable:", metricsRes.status);
+      }
+    } catch (err) {
+      console.warn("Dashboard fetch failed — backend may be offline:", err);
+    }
+  }, []);
 
-    const threatInterval = setInterval(() => {
-      const noise = (Math.random() - 0.5) * 4;
-      setThreatLevel(prev => Math.max(60, Math.min(72, prev + noise)));
-    }, 3500);
+  const fetchLogs = useCallback(async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/agent-logs?limit=15`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) {
+          setLogs(data.reverse().map((l: Record<string, string>) => ({
+            agent: l.agent_name || "Agent",
+            color: "text-primary",
+            text: l.message || "Action executed",
+          })));
+          return;
+        }
+      }
+    } catch {
+      // fall through to Supabase
+    }
+
+    const { data, error } = await supabase
+      .from("agent_logs")
+      .select("agent_name, message, executed_at")
+      .order("executed_at", { ascending: false })
+      .limit(15);
+
+    if (error) {
+      console.warn("Agent logs fetch failed:", error.message);
+      return;
+    }
+    if (data && data.length > 0) {
+      setLogs(
+        [...data].reverse().map((l: Record<string, string>) => ({
+          agent: l.agent_name || "Agent",
+          color: "text-primary",
+          text: l.message || "Action executed",
+        }))
+      );
+    }
+  }, []);
+
+  // Fetch metrics and agent logs from the backend
+  useEffect(() => {
+    void Promise.resolve().then(() => {
+      void fetchDashboard();
+      void fetchLogs();
+    });
+
+    const metricsInterval = setInterval(fetchDashboard, 15000);
+
+    const channel = supabase
+      .channel('dashboard-realtime')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'agent_logs' }, (payload) => {
+        const l = payload.new as Record<string, string>;
+        setLogs(prev => [...prev, {
+          agent: l.agent_name || 'Agent',
+          color: 'text-primary',
+          text: l.message || 'Action executed'
+        }].slice(-15));
+        fetchDashboard();
+      })
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shipments' }, () => {
+        fetchDashboard();
+      })
+      .subscribe();
 
     return () => {
-      clearInterval(logInterval);
-      clearInterval(threatInterval);
+      clearInterval(metricsInterval);
+      supabase.removeChannel(channel);
     };
-  }, []);
+  }, [fetchDashboard, fetchLogs]);
 
   // Scroll to bottom of agent logs whenever log updates
   useEffect(() => {
     feedEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [logs]);
 
-  const handleInterventionSubmit = (e: React.FormEvent) => {
+  const handleInterventionSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inputValue.trim()) return;
 
-    // Append user input as "Operator Intervene"
+    const userText = inputValue.trim();
     const userMsg = {
       agent: "Operator Intervene",
       color: "text-secondary font-bold underline",
-      text: inputValue
+      text: userText
     };
 
     setLogs(prev => [...prev, userMsg].slice(-15));
     setInputValue("");
 
-    // Simulate quick AI response to user input
+    try {
+      await fetch(`${BACKEND_URL}/interventions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ text: userText }),
+      });
+    } catch (err) {
+      console.warn("Intervention save failed:", err);
+    }
+
     setTimeout(() => {
       const aiResponse = {
         agent: "Core AI",
         color: "text-primary-container",
-        text: `Acknowledged operator feedback: "${inputValue}". Adapting routing criteria.`
+        text: `Acknowledged operator feedback: "${userText}". Adapting routing criteria.`
       };
       setLogs(prev => [...prev, aiResponse].slice(-15));
     }, 1200);
@@ -101,7 +176,7 @@ export default function Dashboard() {
             <span className="material-symbols-outlined text-secondary text-xl">warning</span>
           </div>
           <div className="flex flex-col mt-sm">
-            <span className="text-display-lg font-bold text-secondary leading-none tracking-tight">ELEVATED</span>
+            <span className="text-display-lg font-bold text-secondary leading-none tracking-tight uppercase">{threatText}</span>
             <div className="w-full h-[3px] bg-surface-variant rounded-full mt-sm overflow-hidden">
               <div className="bg-secondary h-full rounded-full transition-all duration-700" style={{ width: `${threatLevel}%` }}></div>
             </div>
@@ -115,7 +190,7 @@ export default function Dashboard() {
             <span className="material-symbols-outlined text-error text-xl">emergency</span>
           </div>
           <div className="flex items-baseline gap-sm mt-sm">
-            <span className="text-display-lg font-bold text-error leading-none font-mono">03</span>
+            <span className="text-display-lg font-bold text-error leading-none font-mono">{activeDisruptions.toString().padStart(2, '0')}</span>
             <span className="text-label-md text-on-surface-variant">Events Detected</span>
           </div>
           <p className="text-[10px] text-error/80 uppercase tracking-widest font-mono mt-xs">Sector 7, Sector 12, Node Delta</p>
@@ -128,7 +203,7 @@ export default function Dashboard() {
             <span className="material-symbols-outlined text-primary text-xl">inventory_2</span>
           </div>
           <div className="flex items-baseline gap-sm mt-sm">
-            <span className="text-display-lg font-bold text-primary leading-none font-mono">94%</span>
+            <span className="text-display-lg font-bold text-primary leading-none font-mono">{supplyMatchPct}%</span>
             <span className="text-label-md text-on-surface-variant">Optimal</span>
           </div>
           <div className="flex gap-[3px] mt-xs">
@@ -146,7 +221,7 @@ export default function Dashboard() {
             <span className="material-symbols-outlined text-primary-fixed-dim text-xl">person_pin_circle</span>
           </div>
           <div className="flex items-baseline gap-sm mt-sm">
-            <span className="text-display-lg font-bold text-primary-fixed-dim leading-none font-mono">142</span>
+            <span className="text-display-lg font-bold text-primary-fixed-dim leading-none font-mono">{activeUnits}</span>
             <span className="text-label-md text-on-surface-variant">Active Units</span>
           </div>
           <p className="text-[10px] text-primary-fixed-dim/80 uppercase tracking-widest font-mono mt-xs">89 Logistics | 53 Emergency</p>
@@ -160,13 +235,13 @@ export default function Dashboard() {
           {/* Dark base + grid overlay */}
           <div className="absolute inset-0 bg-[#0b1326] z-0"></div>
           <div className="absolute inset-0 map-grid-overlay z-10 opacity-60"></div>
-          {/* Faint background map image */}
-          <Image
-            fill
-            className="absolute inset-0 w-full h-full object-cover grayscale opacity-10 z-0"
-            alt="Karachi Map Background"
-            src="/images/map_command_center.jpg"
-            sizes="100vw"
+          {/* Faint background map gradient (no external image required) */}
+          <div
+            className="absolute inset-0 w-full h-full opacity-20 z-0"
+            style={{
+              background:
+                "radial-gradient(circle at 30% 40%, rgba(78,222,163,0.15), transparent 50%), radial-gradient(circle at 70% 60%, rgba(255,100,80,0.12), transparent 45%), linear-gradient(135deg, #0b1326 0%, #111827 100%)",
+            }}
           />
           {/* SVG network nodes + routes */}
           <svg className="absolute inset-0 w-full h-full pointer-events-none z-20" viewBox="0 0 800 500" preserveAspectRatio="xMidYMid slice">

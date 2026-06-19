@@ -1,9 +1,11 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { User } from "@supabase/supabase-js";
 import { supabase } from "../../lib/supabaseClient";
+
+const BACKEND_URL = (process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8000/api/v1").replace(/\/+$/, "");
 
 const roleLabels: Record<string, string> = {
   admin: "Admin",
@@ -30,7 +32,7 @@ const initialBaseProfile = {
   profile_complete: false,
 };
 
-const initialRoleData = {
+const initialRoleData: Record<string, Record<string, unknown>> = {
   farmer: {
     farm_name: "",
     farm_type: "conventional",
@@ -102,13 +104,31 @@ const initialRoleData = {
   },
 };
 
-const roleTableMap: Record<string, string | null> = {
-  admin: "admin_profiles",
-  farmer: "farmer_profiles",
-  driver: "driver_profiles",
-  store_owner: "store_profiles",
-  pantry_manager: "pantry_profiles",
+const roleEndpointMap: Record<string, string | null> = {
+  admin: "admin",
+  farmer: "farmer",
+  driver: "driver",
+  store_owner: "store",
+  pantry_manager: "pantry",
   viewer: null,
+};
+
+const apiFetch = async (path: string, token: string, init?: RequestInit) => {
+  const response = await fetch(`${BACKEND_URL}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+      ...(init?.headers || {}),
+    },
+  });
+
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.detail || `Profile request failed (${response.status})`);
+  }
+
+  return response.json();
 };
 
 const normalizeRole = (value?: string) => {
@@ -136,6 +156,10 @@ type BaseProfile = {
 
 type RoleData = Record<string, string | boolean>;
 
+/** Coerce a RoleData value to string for use in <input value={...}> */
+const sv = (v: string | boolean | undefined): string =>
+  v === undefined || v === null ? "" : typeof v === "boolean" ? String(v) : v;
+
 export default function ProfilePage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -143,10 +167,10 @@ export default function ProfilePage() {
   const [success, setSuccess] = useState<string | null>(null);
   const [sessionUser, setSessionUser] = useState<User | null>(null);
   const [profile, setProfile] = useState<BaseProfile>(initialBaseProfile);
-  const [roleData, setRoleData] = useState<RoleData>(initialRoleData.farmer);
+  const [roleData, setRoleData] = useState<RoleData>(initialRoleData.farmer as RoleData);
 
   const roleLabel = roleLabels[profile.role] || profile.role || "Viewer";
-  const roleTable = roleTableMap[profile.role] || null;
+  const roleEndpoint = roleEndpointMap[profile.role] || null;
 
   const parseNumber = (value: string | number | null | undefined) => {
     if (value === null || value === undefined || value === "") return null;
@@ -163,7 +187,7 @@ export default function ProfilePage() {
       .filter(Boolean);
   };
 
-  const loadProfile = async () => {
+  const loadProfile = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
@@ -180,18 +204,8 @@ export default function ProfilePage() {
       }
 
       setSessionUser(session.user);
-      const authId = session.user.id;
-      const profileQuery = await supabase
-        .from("user_profiles")
-        .select(
-          "full_name, email, role, phone, address, latitude, longitude, availability_status, emergency_contact_name, emergency_contact_phone, emergency_contact_relationship, additional_credentials, profile_complete"
-        )
-        .eq("auth_id", authId)
-        .maybeSingle();
-
-      if (profileQuery.error) throw profileQuery.error;
-
-      const row = profileQuery.data;
+      const profileResponse = await apiFetch("/profiles/me", session.access_token);
+      const row = profileResponse.base;
       const resolvedRole = normalizeRole(row?.role || session.user.user_metadata?.role);
 
       setProfile({
@@ -211,49 +225,42 @@ export default function ProfilePage() {
         profile_complete: Boolean(row?.profile_complete),
       });
 
-      const roleTableName = roleTableMap[resolvedRole];
-      if (roleTableName) {
-        const roleQuery = await supabase
-          .from(roleTableName)
-          .select("*")
-          .eq("auth_id", authId)
-          .maybeSingle();
-
-        if (roleQuery.error) throw roleQuery.error;
-
-        if (roleQuery.data) {
-          const savedData = roleQuery.data;
-          const allowedKeys = Object.keys(initialRoleData[resolvedRole] || {});
-          setRoleData((prev: RoleData) => ({
-            ...prev,
-            ...Object.fromEntries(
-              Object.entries(savedData)
-                .filter(([key]) => allowedKeys.includes(key))
-                .map(([key, value]) => [
-                  key,
-                  Array.isArray(value) ? value.join(", ") : value ?? "",
-                ])
-            ),
-          }));
-        } else {
-          setRoleData(initialRoleData[resolvedRole] || initialRoleData.farmer);
-        }
+      const savedData = profileResponse.role_specific;
+      if (savedData && Object.keys(savedData).length > 0) {
+        const allowedKeys = Object.keys(initialRoleData[resolvedRole] || {});
+        setRoleData((prev: RoleData) => ({
+          ...prev,
+          ...Object.fromEntries(
+            Object.entries(savedData)
+              .filter(([key]) => allowedKeys.includes(key))
+              .map(([key, value]) => [
+                key,
+                Array.isArray(value)
+                  ? value.join(", ")
+                  : typeof value === "boolean"
+                  ? value
+                  : value == null
+                  ? ""
+                  : String(value),
+              ])
+          ),
+        } as RoleData));
       } else {
-        setRoleData(initialRoleData.farmer);
+        setRoleData((initialRoleData[resolvedRole] || initialRoleData.farmer) as RoleData);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     const runLoadProfile = async () => {
       await loadProfile();
     };
     void runLoadProfile();
-  }, []);
+  }, [loadProfile]);
 
   const validateRequiredFields = () => {
     const requiredMap: Record<string, string[]> = {
@@ -320,7 +327,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Farm name</span>
                 <input
                   type="text"
-                  value={roleData.farm_name}
+                  value={sv(roleData.farm_name)}
                   onChange={(e) => setRoleData({ ...roleData, farm_name: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -330,7 +337,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Farm type</span>
                 <input
                   type="text"
-                  value={roleData.farm_type}
+                  value={sv(roleData.farm_type)}
                   onChange={(e) => setRoleData({ ...roleData, farm_type: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -342,7 +349,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Crops produced</span>
                 <input
                   type="text"
-                  value={roleData.crops_produced}
+                  value={sv(roleData.crops_produced)}
                   onChange={(e) => setRoleData({ ...roleData, crops_produced: e.target.value })}
                   placeholder="Rice, Wheat, Tomatoes"
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
@@ -353,7 +360,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Farm size (acres)</span>
                 <input
                   type="number"
-                  value={roleData.farm_size_acres}
+                  value={sv(roleData.farm_size_acres)}
                   onChange={(e) => setRoleData({ ...roleData, farm_size_acres: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -365,7 +372,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Available quantity</span>
                 <input
                   type="text"
-                  value={roleData.available_quantity}
+                  value={sv(roleData.available_quantity)}
                   onChange={(e) => setRoleData({ ...roleData, available_quantity: e.target.value })}
                   placeholder="2000 kg"
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
@@ -376,7 +383,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Storage availability</span>
                 <input
                   type="text"
-                  value={roleData.storage_availability}
+                  value={sv(roleData.storage_availability)}
                   onChange={(e) => setRoleData({ ...roleData, storage_availability: e.target.value })}
                   placeholder="Cold storage available / On-farm storage"
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
@@ -400,7 +407,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Max delivery distance (km)</span>
                 <input
                   type="number"
-                  value={roleData.max_delivery_distance_km}
+                  value={sv(roleData.max_delivery_distance_km)}
                   onChange={(e) => setRoleData({ ...roleData, max_delivery_distance_km: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                 />
@@ -411,7 +418,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Certifications / registration</span>
                 <input
                   type="text"
-                  value={roleData.organic_certification}
+                  value={sv(roleData.organic_certification)}
                   onChange={(e) => setRoleData({ ...roleData, organic_certification: e.target.value })}
                   placeholder="Organic / Govt registration info"
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
@@ -421,7 +428,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Government IDs</span>
                 <input
                   type="text"
-                  value={roleData.government_registration_number}
+                  value={sv(roleData.government_registration_number)}
                   onChange={(e) => setRoleData({ ...roleData, government_registration_number: e.target.value })}
                   placeholder="GST / registration / FSSAI"
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
@@ -439,7 +446,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Vehicle type</span>
                 <input
                   type="text"
-                  value={roleData.vehicle_type}
+                  value={sv(roleData.vehicle_type)}
                   onChange={(e) => setRoleData({ ...roleData, vehicle_type: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -449,7 +456,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Vehicle plate</span>
                 <input
                   type="text"
-                  value={roleData.vehicle_plate}
+                  value={sv(roleData.vehicle_plate)}
                   onChange={(e) => setRoleData({ ...roleData, vehicle_plate: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                 />
@@ -460,7 +467,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Maximum load (kg)</span>
                 <input
                   type="number"
-                  value={roleData.max_load_kg}
+                  value={sv(roleData.max_load_kg)}
                   onChange={(e) => setRoleData({ ...roleData, max_load_kg: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -470,7 +477,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Cargo capacity notes</span>
                 <input
                   type="text"
-                  value={roleData.vehicle_capacity_description}
+                  value={sv(roleData.vehicle_capacity_description)}
                   onChange={(e) => setRoleData({ ...roleData, vehicle_capacity_description: e.target.value })}
                   placeholder="e.g. 8m3 insulated trailer"
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
@@ -482,7 +489,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">License number</span>
                 <input
                   type="text"
-                  value={roleData.license_number}
+                  value={sv(roleData.license_number)}
                   onChange={(e) => setRoleData({ ...roleData, license_number: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -492,7 +499,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">License expiry</span>
                 <input
                   type="date"
-                  value={roleData.license_expiry}
+                  value={sv(roleData.license_expiry)}
                   onChange={(e) => setRoleData({ ...roleData, license_expiry: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -504,7 +511,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Insurance provider</span>
                 <input
                   type="text"
-                  value={roleData.vehicle_insurance_provider}
+                  value={sv(roleData.vehicle_insurance_provider)}
                   onChange={(e) => setRoleData({ ...roleData, vehicle_insurance_provider: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                 />
@@ -513,7 +520,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Insurance valid until</span>
                 <input
                   type="date"
-                  value={roleData.insurance_valid_until}
+                  value={sv(roleData.insurance_valid_until)}
                   onChange={(e) => setRoleData({ ...roleData, insurance_valid_until: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                 />
@@ -524,7 +531,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Operating radius (km)</span>
                 <input
                   type="number"
-                  value={roleData.operating_radius_km}
+                  value={sv(roleData.operating_radius_km)}
                   onChange={(e) => setRoleData({ ...roleData, operating_radius_km: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -534,7 +541,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Available weekdays</span>
                 <input
                   type="text"
-                  value={roleData.available_weekdays}
+                  value={sv(roleData.available_weekdays)}
                   onChange={(e) => setRoleData({ ...roleData, available_weekdays: e.target.value })}
                   placeholder="Mon-Fri / 24x7"
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
@@ -576,7 +583,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Store name</span>
                 <input
                   type="text"
-                  value={roleData.store_name}
+                  value={sv(roleData.store_name)}
                   onChange={(e) => setRoleData({ ...roleData, store_name: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -586,7 +593,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Store type</span>
                 <input
                   type="text"
-                  value={roleData.store_type}
+                  value={sv(roleData.store_type)}
                   onChange={(e) => setRoleData({ ...roleData, store_type: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -598,7 +605,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Inventory categories</span>
                 <input
                   type="text"
-                  value={roleData.inventory_categories}
+                  value={sv(roleData.inventory_categories)}
                   onChange={(e) => setRoleData({ ...roleData, inventory_categories: e.target.value })}
                   placeholder="Fruit, Dairy, Staples"
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
@@ -609,7 +616,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Cold storage capacity (kg)</span>
                 <input
                   type="number"
-                  value={roleData.cold_storage_capacity}
+                  value={sv(roleData.cold_storage_capacity)}
                   onChange={(e) => setRoleData({ ...roleData, cold_storage_capacity: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                 />
@@ -620,7 +627,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Average daily customers</span>
                 <input
                   type="number"
-                  value={roleData.average_daily_customers}
+                  value={sv(roleData.average_daily_customers)}
                   onChange={(e) => setRoleData({ ...roleData, average_daily_customers: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                 />
@@ -629,7 +636,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Current suppliers</span>
                 <input
                   type="text"
-                  value={roleData.current_suppliers}
+                  value={sv(roleData.current_suppliers)}
                   onChange={(e) => setRoleData({ ...roleData, current_suppliers: e.target.value })}
                   placeholder="Supplier A, Supplier B"
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
@@ -642,7 +649,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Alternative suppliers</span>
                 <input
                   type="text"
-                  value={roleData.alternative_suppliers}
+                  value={sv(roleData.alternative_suppliers)}
                   onChange={(e) => setRoleData({ ...roleData, alternative_suppliers: e.target.value })}
                   placeholder="Backup supplier names"
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
@@ -671,7 +678,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Pantry name</span>
                 <input
                   type="text"
-                  value={roleData.pantry_name}
+                  value={sv(roleData.pantry_name)}
                   onChange={(e) => setRoleData({ ...roleData, pantry_name: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -681,7 +688,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Organization type</span>
                 <input
                   type="text"
-                  value={roleData.organization_type}
+                  value={sv(roleData.organization_type)}
                   onChange={(e) => setRoleData({ ...roleData, organization_type: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -693,7 +700,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Families served</span>
                 <input
                   type="number"
-                  value={roleData.families_served}
+                  value={sv(roleData.families_served)}
                   onChange={(e) => setRoleData({ ...roleData, families_served: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -703,7 +710,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Population covered</span>
                 <input
                   type="number"
-                  value={roleData.population_covered}
+                  value={sv(roleData.population_covered)}
                   onChange={(e) => setRoleData({ ...roleData, population_covered: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -714,7 +721,7 @@ export default function ProfilePage() {
               <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Food requirements</span>
               <input
                 type="text"
-                value={roleData.food_requirements}
+                value={sv(roleData.food_requirements)}
                 onChange={(e) => setRoleData({ ...roleData, food_requirements: e.target.value })}
                 placeholder="Rice, canned goods, fresh vegetables"
                 className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
@@ -726,7 +733,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Warehouse capacity</span>
                 <input
                   type="number"
-                  value={roleData.warehouse_capacity}
+                  value={sv(roleData.warehouse_capacity)}
                   onChange={(e) => setRoleData({ ...roleData, warehouse_capacity: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                 />
@@ -735,7 +742,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Volunteer count</span>
                 <input
                   type="number"
-                  value={roleData.volunteer_count}
+                  value={sv(roleData.volunteer_count)}
                   onChange={(e) => setRoleData({ ...roleData, volunteer_count: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                 />
@@ -752,7 +759,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Organization name</span>
                 <input
                   type="text"
-                  value={roleData.organization_name}
+                  value={sv(roleData.organization_name)}
                   onChange={(e) => setRoleData({ ...roleData, organization_name: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -762,7 +769,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Department</span>
                 <input
                   type="text"
-                  value={roleData.department}
+                  value={sv(roleData.department)}
                   onChange={(e) => setRoleData({ ...roleData, department: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -774,7 +781,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Designation</span>
                 <input
                   type="text"
-                  value={roleData.designation}
+                  value={sv(roleData.designation)}
                   onChange={(e) => setRoleData({ ...roleData, designation: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -784,7 +791,7 @@ export default function ProfilePage() {
                 <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Authority level</span>
                 <input
                   type="text"
-                  value={roleData.authority_level}
+                  value={sv(roleData.authority_level)}
                   onChange={(e) => setRoleData({ ...roleData, authority_level: e.target.value })}
                   className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
                   required
@@ -795,7 +802,7 @@ export default function ProfilePage() {
               <span className="text-[11px] text-on-surface-variant uppercase tracking-[0.2em] font-bold">Managed regions</span>
               <input
                 type="text"
-                value={roleData.managed_regions}
+                value={sv(roleData.managed_regions)}
                 onChange={(e) => setRoleData({ ...roleData, managed_regions: e.target.value })}
                 placeholder="District 1, Zone A"
                 className="mt-2 w-full rounded-lg border border-outline-variant/30 bg-background px-4 py-3 text-sm outline-none focus:border-primary focus:ring-1 focus:ring-primary"
@@ -819,15 +826,23 @@ export default function ProfilePage() {
         throw new Error("Unable to save profile: no authenticated user.");
       }
 
+      const {
+        data: { session },
+        error: sessionError,
+      } = await supabase.auth.getSession();
+
+      if (sessionError) throw sessionError;
+      if (!session?.access_token) {
+        throw new Error("Please sign in again before saving your profile.");
+      }
+
       const missingRoleFields = validateRequiredFields();
       if (missingRoleFields.length > 0) {
         throw new Error(`Please complete all required ${roleLabel} fields: ${missingRoleFields.join(", ")}`);
       }
 
       const profilePayload = {
-        auth_id: sessionUser.id,
         full_name: profile.full_name.trim(),
-        email: profile.email.trim(),
         phone: profile.phone.trim() || null,
         address: profile.address.trim() || null,
         latitude: parseNumber(profile.latitude),
@@ -837,23 +852,17 @@ export default function ProfilePage() {
         emergency_contact_phone: profile.emergency_contact_phone.trim() || null,
         emergency_contact_relationship: profile.emergency_contact_relationship.trim() || null,
         additional_credentials: profile.additional_credentials.trim() || null,
-        role: profile.role,
         profile_complete: missingRoleFields.length === 0,
       };
 
-      const { error: profileError } = await supabase
-        .from("user_profiles")
-        .upsert(profilePayload, { onConflict: "auth_id" });
+      await apiFetch("/profiles/update-base", session.access_token, {
+        method: "POST",
+        body: JSON.stringify(profilePayload),
+      });
 
-      if (profileError) {
-        throw profileError;
-      }
-
-      if (roleTable) {
+      if (roleEndpoint) {
         const allowedKeys = Object.keys(initialRoleData[profile.role] || {});
-        const rolePayload: Record<string, unknown> = {
-          auth_id: sessionUser.id,
-          ...Object.fromEntries(
+        const rolePayload: Record<string, unknown> = Object.fromEntries(
             Object.entries(roleData)
               .filter(([key]) => allowedKeys.includes(key))
               .map(([key, value]) => {
@@ -866,16 +875,12 @@ export default function ProfilePage() {
                 }
                 return [key, value || null];
               })
-          ),
-        };
+          );
 
-        const { error: roleError } = await supabase
-          .from(roleTable)
-          .upsert(rolePayload, { onConflict: "auth_id" });
-
-        if (roleError) {
-          throw roleError;
-        }
+        await apiFetch(`/profiles/${roleEndpoint}/update`, session.access_token, {
+          method: "POST",
+          body: JSON.stringify(rolePayload),
+        });
       }
 
       setSuccess("Profile saved successfully.");

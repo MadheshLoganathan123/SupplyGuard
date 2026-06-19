@@ -1,6 +1,5 @@
 "use client";
 
-import Image from "next/image";
 import { usePathname } from "next/navigation";
 import { useState, useEffect } from "react";
 import Link from "next/link";
@@ -184,11 +183,11 @@ function AppChrome({ children }: { children: React.ReactNode }) {
               {authUser ? (
                 <Link href="/profile" className="flex items-center gap-2 rounded-full hover:bg-surface-variant/60 px-2 py-1 transition-colors">
                   <div className="text-right hidden xl:block">
-                    <p className="text-label-md font-label-md leading-none font-medium">{authUser.user_metadata?.full_name || authUser.email.split("@")[0]}</p>
+                    <p className="text-label-md font-label-md leading-none font-medium">{authUser.user_metadata?.full_name || authUser.email?.split("@")[0] || "User"}</p>
                     <p className="text-[10px] text-primary-container font-bold uppercase tracking-widest">{authUser.user_metadata?.role || "User"}</p>
                   </div>
-                  <div className="relative w-9 h-9 rounded-full overflow-hidden border border-primary/20">
-                    <Image fill className="object-cover" alt="System Core Profile" src="/images/user_profile.jpg" sizes="100vw" />
+                  <div className="relative w-9 h-9 rounded-full overflow-hidden border border-primary/20 bg-primary/20 flex items-center justify-center">
+                    <span className="material-symbols-outlined text-primary text-[18px]">person</span>
                   </div>
                 </Link>
               ) : (
