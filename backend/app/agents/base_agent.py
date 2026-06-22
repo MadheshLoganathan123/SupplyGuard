@@ -6,7 +6,7 @@ Each agent can perceive state, decide an action, and execute it.
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 
 @dataclass
@@ -16,6 +16,9 @@ class AgentContext:
     threat_level: str
     active_incidents: list[str] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Optional computed attributes (set by ProfileContextService)
+    inventory_status: Optional[str] = None  # "LOW", "NORMAL", "HIGH"
+    sector_demand_level: Optional[str] = None  # "LOW", "NORMAL", "HIGH"
 
 
 @dataclass
