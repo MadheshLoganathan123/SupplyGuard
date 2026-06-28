@@ -17,6 +17,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.base_agent import AgentContext
+from app.agents.negotiation_agent import NegotiationAgent
 from app.agents.orchestrator import AgentOrchestrator
 from app.database.session import AsyncSessionLocal
 from app.models.intervention import Intervention
@@ -139,10 +140,29 @@ async def process_intervention(
                 agent_responses.append(response)
 
             elif intervention_type == "NEGOTIATE":
-                # Placeholder for future NegotiationAgent
+                negotiation_agent = NegotiationAgent(db)
+                context = AgentContext(
+                    sector=_extract_sector(intervention.text) or "CENTRAL",
+                    threat_level="ELEVATED",
+                    active_incidents=[],
+                    metadata={"intervention_id": intervention.id, "intervention_text": intervention.text},
+                )
+                perception = await negotiation_agent.perceive(context)
+                action = await negotiation_agent.decide(perception)
+                execution = await negotiation_agent.act(action)
+                await svc.agent_log_service.create_log(
+                    agent_name="NegotiationAgent",
+                    decision=action.action_type.upper(),
+                    payload=action.payload,
+                    result=execution,
+                    confidence=action.confidence,
+                    message=f"Negotiation agent responded to intervention {intervention.id}",
+                )
                 agent_responses.append({
-                    "action": "NEGOTIATE",
-                    "status": "awaiting_negotiation_agent",
+                    "action": action.action_type,
+                    "confidence": action.confidence,
+                    "payload": action.payload,
+                    "execution": execution,
                 })
 
             # Step 4: Update intervention status based on response

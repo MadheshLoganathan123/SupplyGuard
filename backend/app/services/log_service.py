@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.agent_log import AgentLog, AgentLogStatus
 from app.schemas.agent_log import AgentLogCreate
-from app.utils.websocket import manager
+from app.api.websocket_manager import manager
 
 
 class LogService:
@@ -31,7 +31,7 @@ class LogService:
         await self.db.refresh(log)
 
         # Broadcast the new log to all WebSocket clients
-        await manager.broadcast({
+        await manager.broadcast("dashboard", {
             "type": "log",
             "data": {
                 "id": str(log.id),

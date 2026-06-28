@@ -102,7 +102,7 @@ class LogisticsAgent(BaseAgent):
                     "sector": perception["sector"],
                     "reason": f"Threat level {threat_level}: rerouting via available drivers and alternative stores",
                     "alternate_path": alternate_path,
-                    "selected_driver": best_driver.get("driver_name") if best_driver else None,
+                    "selected_driver": (best_driver.get("vehicle_plate") or best_driver.get("id")) if best_driver else None,
                     "selected_driver_id": best_driver.get("id") if best_driver else None,
                     "selected_store": best_store.get("store_name") if best_store else None,
                     "selected_store_id": best_store.get("id") if best_store else None,
@@ -163,9 +163,9 @@ class LogisticsAgent(BaseAgent):
         """Fetch all available drivers in the sector from Supabase."""
         try:
             result = self.client.table("driver_profiles").select(
-                "id, driver_name, vehicle_type, max_load_kg, operating_radius_km, "
-                "emergency_ready, operating_location, available_status"
-            ).ilike("operating_location", f"%{sector}%").eq("available_status", "available").execute()
+                "id, auth_id, vehicle_type, vehicle_plate, max_load_kg, operating_radius_km, "
+                "emergency_ready, current_latitude, current_longitude"
+            ).execute()
 
             drivers = result.data if result.data else []
             logger.info(f"Fetched {len(drivers)} available drivers in sector {sector}")
@@ -183,9 +183,9 @@ class LogisticsAgent(BaseAgent):
         """Fetch destination stores in the sector that can accept deliveries."""
         try:
             result = self.client.table("store_profiles").select(
-                "id, store_name, store_location, average_daily_demand, "
-                "accepting_emergency_deliveries, cold_storage_capacity, accepting_deliveries"
-            ).ilike("store_location", f"%{sector}%").eq("accepting_deliveries", True).execute()
+                "id, auth_id, store_name, address, latitude, longitude, average_daily_demand, "
+                "accepts_emergency_deliveries, cold_storage_capacity"
+            ).execute()
 
             stores = result.data if result.data else []
             logger.info(f"Fetched {len(stores)} available stores in sector {sector}")
@@ -248,7 +248,7 @@ class LogisticsAgent(BaseAgent):
         # Filter by emergency acceptance if needed
         qualified = stores
         if is_emergency:
-            qualified = [s for s in stores if s.get("accepting_emergency_deliveries", False)]
+            qualified = [s for s in stores if s.get("accepts_emergency_deliveries", False)]
 
         # Filter by cold storage if needed
         if requires_cold_storage:
@@ -276,7 +276,7 @@ class LogisticsAgent(BaseAgent):
         if not driver:
             return f"{origin} → {destination} (direct)"
 
-        driver_name = driver.get("driver_name", "Driver")
+        driver_name = driver.get("vehicle_plate") or driver.get("id", "Driver")
         vehicle = driver.get("vehicle_type", "Vehicle")
 
         return f"{origin} → {destination} (via {driver_name} in {vehicle})"

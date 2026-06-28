@@ -44,12 +44,12 @@ Dashboard, Logistics, Network, Reports wired to backend + DB. Auth/Profile via S
 
 ## Week 3 — Intelligence + Live UI (Days 15–21)
 
-- [ ] **15–16:** `llm_service.py` + structured agent outputs
-- [ ] **17:** Agent tools: `find_drivers`, `query_inventory`, `compute_route`
-- [ ] **18:** `NegotiationAgent` for pantry/incident coordination
-- [ ] **19:** WebSocket `/ws/dashboard`, `/ws/shipments`
-- [ ] **20:** Live dashboard ticker; AppShell reroute → backend
-- [ ] **21:** Logistics paths from API (remove static cards)
+- [x] **15–16:** `llm_service.py` + structured agent outputs
+- [x] **17:** Agent tools: `find_drivers`, `query_inventory`, `compute_route`
+- [x] **18:** `NegotiationAgent` for pantry/incident coordination
+- [x] **19:** WebSocket `/ws/dashboard`, `/ws/shipments`
+- [x] **20:** Live dashboard ticker; AppShell reroute → backend
+- [x] **21:** Logistics paths from API (remove static cards)
 
 **Exit:** LLM-assisted agent + live updates without full refresh.
 

@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useRef, useCallback } from "react";
 import { supabase } from "../lib/supabaseClient";
+import { useWebSocket } from "../lib/useWebSocket";
 
 interface Message {
   agent: string;
@@ -117,6 +118,40 @@ export default function Dashboard() {
       supabase.removeChannel(channel);
     };
   }, [fetchDashboard, fetchLogs]);
+
+  // WebSocket for real-time dashboard updates
+  const { isConnected: wsConnected } = useWebSocket(
+    '/api/v1/ws/dashboard',
+    {
+      onMessage: (message) => {
+        if (message.type === 'agent_action') {
+          const action = message.data || {};
+          setLogs(prev => [...prev, {
+            agent: action.agent_name || 'Agent',
+            color: 'text-primary',
+            text: action.reasoning || action.message || 'Action executed'
+          }].slice(-15));
+          fetchDashboard();
+        } else if (message.type === 'incident_alert') {
+          const incident = message.data || {};
+          setLogs(prev => [...prev, {
+            agent: 'Alert System',
+            color: message.severity === 'critical' ? 'text-error' : 'text-warning',
+            text: `${incident.type}: ${incident.description || 'Incident detected'}`
+          }].slice(-15));
+          fetchDashboard();
+        } else if (message.type === 'dashboard_update') {
+          fetchDashboard();
+        }
+      },
+      onConnect: () => {
+        console.log('Dashboard WebSocket connected');
+      },
+      onDisconnect: () => {
+        console.log('Dashboard WebSocket disconnected');
+      },
+    }
+  );
 
   // Scroll to bottom of agent logs whenever log updates
   useEffect(() => {

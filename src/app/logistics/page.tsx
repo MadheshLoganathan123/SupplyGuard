@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { supabase } from "../../lib/supabaseClient";
+import { useWebSocket } from "../../lib/useWebSocket";
 
 interface Shipment {
   id: string;          // shipment_code displayed in the table
@@ -36,6 +37,29 @@ export default function Logistics() {
   const [agents, setAgents] = useState<string[]>([]);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const loadPaths = useCallback(async () => {
+    try {
+      const res = await fetch(`${BACKEND_URL}/routing/computed-routes?limit=5`);
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data) && data.length > 0) {
+          const apiPaths = data.map((route: Record<string, any>, idx: number) => ({
+            name: `PATH ${String.fromCharCode(65 + idx)}: ${route.optimization_criteria || 'OPTIMIZED'}`,
+            dist: `${route.distance_km?.toFixed(1) || '0'}km`,
+            desc: route.description || 'API-computed route',
+            efficiency: Math.round((route.efficiency_score || 0.8) * 100),
+            color: idx % 2 === 0 ? 'primary' as const : 'secondary' as const,
+          }));
+          setPaths(apiPaths);
+          return;
+        }
+      }
+    } catch (err) {
+      console.warn("Failed to load API routes, using static paths:", err);
+    }
+    setPaths(STATIC_PATHS);
+  }, []);
 
   const loadShipments = useCallback(async () => {
     try {
@@ -79,6 +103,7 @@ export default function Logistics() {
     void Promise.resolve().then(() => {
       void loadShipments();
       void loadAgents();
+      void loadPaths();
     });
 
     // Supabase Realtime Subscription
@@ -92,7 +117,33 @@ export default function Logistics() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [loadShipments, loadAgents]);
+  }, [loadShipments, loadAgents, loadPaths]);
+
+  // WebSocket for real-time shipment updates
+  const { isConnected: wsConnected } = useWebSocket(
+    '/api/v1/ws/shipments',
+    {
+      onMessage: (message) => {
+        if (message.type === 'shipment_update') {
+          const { shipment_id, data } = message;
+          const update = data && typeof data === "object" ? data as Partial<Shipment> : {};
+          setShipments(prev => prev.map(s => 
+            s._dbId === shipment_id 
+              ? { ...s, ...update, status: update.status || s.status }
+              : s
+          ));
+        } else if (message.type === 'subscribed') {
+          console.log('Subscribed to shipment:', message.shipment_id);
+        }
+      },
+      onConnect: () => {
+        console.log('Shipments WebSocket connected');
+      },
+      onDisconnect: () => {
+        console.log('Shipments WebSocket disconnected');
+      },
+    }
+  );
   const [simulating, setSimulating] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
 

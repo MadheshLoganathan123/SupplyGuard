@@ -21,6 +21,7 @@ from app.api.endpoints import (
     routing,
     shipments,
     stores,
+    websocket,
 )
 
 api_router = APIRouter()
@@ -47,6 +48,10 @@ api_router.include_router(nodes.router,     prefix="/nodes",     tags=["Nodes"])
 api_router.include_router(projections.router, prefix="/projections", tags=["Projections"])
 api_router.include_router(heuristics.router, prefix="/heuristics", tags=["Heuristics"])
 api_router.include_router(reports.router,   prefix="/reports",   tags=["Reports"])
+
+# ── Real-time updates ─────────────────────────────────────────────────────────
+api_router.include_router(websocket.router, tags=["WebSocket"])
+
 
 # ── Dashboard (mounts at root so /dashboard/metrics, /agent-logs, etc. work) ─
 api_router.include_router(dashboard.router, prefix="",           tags=["Dashboard"])

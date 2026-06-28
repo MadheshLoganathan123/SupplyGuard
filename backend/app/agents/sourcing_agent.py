@@ -151,9 +151,9 @@ class SourcingAgent(BaseAgent):
         """Fetch all available farmers in the sector from Supabase."""
         try:
             result = self.client.table("farmer_profiles").select(
-                "id, farmer_name, crops_produced, available_quantity, "
-                "storage_availability, can_self_deliver, trust_score, farm_location"
-            ).ilike("farm_location", f"%{sector}%").execute()
+                "id, auth_id, farm_name, crops_produced, available_quantity, "
+                "storage_availability, can_self_deliver"
+            ).execute()
 
             farmers = result.data if result.data else []
             logger.info(f"Fetched {len(farmers)} available farmers in sector {sector}")
@@ -168,8 +168,8 @@ class SourcingAgent(BaseAgent):
         try:
             result = self.client.table("store_profiles").select(
                 "id, store_name, inventory_categories, average_daily_demand, "
-                "cold_storage_capacity, current_suppliers, store_location"
-            ).ilike("store_location", f"%{sector}%").execute()
+                "cold_storage_capacity, current_suppliers, address"
+            ).execute()
 
             stores = result.data if result.data else []
             logger.info(f"Fetched {len(stores)} demand stores in sector {sector}")
@@ -211,7 +211,7 @@ class SourcingAgent(BaseAgent):
             if best_store and best_score > 0.5:  # Threshold for a valid match
                 pairs.append({
                     "farmer_id": farmer.get("id"),
-                    "farmer_name": farmer.get("farmer_name"),
+                    "farmer_name": farmer.get("farm_name"),
                     "crops": farmer.get("crops_produced", []),
                     "available_qty_kg": farmer.get("available_quantity", 0),
                     "store_id": best_store.get("id"),

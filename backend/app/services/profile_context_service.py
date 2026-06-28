@@ -8,12 +8,9 @@ AgentContext with threat level, inventory status, and demand metrics.
 import logging
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.base_agent import AgentContext
-from app.database.supabase_client import supabase_admin
-from app.models.incident import Incident
 from app.models.shipment import Shipment
 from app.services.inventory_service import InventoryService
 from app.services.profile_service import ProfileService
@@ -145,7 +142,7 @@ class ProfileContextService:
             return "ELEVATED"
         return "NORMAL"
 
-    async def _extract_sector(self, location: str) -> str:
+    def _extract_sector(self, location: str) -> str:
         """Extract sector identifier from location string (e.g., 'North', 'East')."""
         # Simple implementation: assume sector is first word
         # In production: use a location→sector mapping service
@@ -170,23 +167,9 @@ class ProfileContextService:
         }
 
         try:
-            # Fetch driver profiles
-            result = supabase_admin.table("driver_profiles").select("*").ilike(
-                "operating_location", f"%{location}%"
-            ).execute()
-            profiles["drivers"] = result.data if result.data else []
-
-            # Fetch farmer profiles
-            result = supabase_admin.table("farmer_profiles").select("*").ilike(
-                "farm_location", f"%{location}%"
-            ).execute()
-            profiles["farmers"] = result.data if result.data else []
-
-            # Fetch store profiles
-            result = supabase_admin.table("store_profiles").select("*").ilike(
-                "store_location", f"%{location}%"
-            ).execute()
-            profiles["stores"] = result.data if result.data else []
+            profiles["drivers"] = await self.profile_service.discover_drivers()
+            profiles["farmers"] = await self.profile_service.discover_farmers()
+            profiles["stores"] = await self.profile_service.discover_stores()
 
             logger.debug(
                 f"Fetched profiles for {location}: "
@@ -253,13 +236,7 @@ class ProfileContextService:
     async def _get_driver_availability(self, sector: str) -> Dict[str, Any]:
         """Get driver availability metrics for the sector."""
         try:
-            result = supabase_admin.table("driver_profiles").select(
-                "vehicle_type, max_load_kg, operating_radius_km, emergency_ready"
-            ).ilike(
-                "operating_location", f"%{sector}%"
-            ).execute()
-
-            drivers = result.data if result.data else []
+            drivers = await self.profile_service.discover_drivers()
             return {
                 "total_available": len(drivers),
                 "emergency_ready": sum(1 for d in drivers if d.get("emergency_ready")),
@@ -273,16 +250,10 @@ class ProfileContextService:
     async def _get_store_capacity(self, sector: str) -> Dict[str, Any]:
         """Get store capacity metrics for the sector."""
         try:
-            result = supabase_admin.table("store_profiles").select(
-                "store_name, cold_storage_capacity, accepting_emergency_deliveries"
-            ).ilike(
-                "store_location", f"%{sector}%"
-            ).execute()
-
-            stores = result.data if result.data else []
+            stores = await self.profile_service.discover_stores()
             return {
                 "total_stores": len(stores),
-                "accepting_emergency": sum(1 for s in stores if s.get("accepting_emergency_deliveries")),
+                "accepting_emergency": sum(1 for s in stores if s.get("accepts_emergency_deliveries")),
                 "total_cold_storage_capacity": sum(s.get("cold_storage_capacity", 0) for s in stores),
             }
 
@@ -293,18 +264,15 @@ class ProfileContextService:
     async def _get_farmer_surplus(self, sector: str) -> Dict[str, Any]:
         """Get farmer surplus/supply metrics for the sector."""
         try:
-            result = supabase_admin.table("farmer_profiles").select(
-                "farmer_name, crops_produced, available_quantity, can_self_deliver, trust_score"
-            ).ilike(
-                "farm_location", f"%{sector}%"
-            ).execute()
-
-            farmers = result.data if result.data else []
+            farmers = await self.profile_service.discover_farmers()
             return {
                 "total_farmers": len(farmers),
                 "can_self_deliver": sum(1 for f in farmers if f.get("can_self_deliver")),
                 "total_available_qty": sum(f.get("available_quantity", 0) for f in farmers),
-                "avg_trust_score": sum(f.get("trust_score", 0) for f in farmers) / len(farmers) if farmers else 0,
+                "avg_trust_score": (
+                    sum((f.get("user_profile") or {}).get("trust_score", 0) for f in farmers) / len(farmers)
+                    if farmers else 0
+                ),
             }
 
         except Exception as e:

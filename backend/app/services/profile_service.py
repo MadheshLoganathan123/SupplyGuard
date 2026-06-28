@@ -1,6 +1,7 @@
 """Profile service backed by Supabase tables."""
 
 from math import asin, cos, radians, sin, sqrt
+import logging
 from typing import Any, Dict, Iterable, List, Optional
 from uuid import UUID
 
@@ -85,6 +86,10 @@ class ProfileService:
     def _upsert_by_auth_id(self, table: str, user_id: UUID | str, payload: Dict[str, Any]) -> Dict[str, Any]:
         clean = self._clean_payload({"auth_id": str(user_id), **payload})
         result = self.client.table(table).upsert(clean, on_conflict="auth_id").execute()
+        # Log Supabase client errors to help diagnose failed upserts (e.g., missing service role key / permissions)
+        err = getattr(result, "error", None)
+        if err:
+            logging.getLogger(__name__).warning("Supabase upsert error for %s (auth_id=%s): %s", table, user_id, err)
         row = self._one(result)
         if row is None:
             row = self._select_by_auth_id(table, user_id)

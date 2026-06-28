@@ -17,7 +17,7 @@ from app.models.shipment import Shipment, ShipmentStatus
 from app.services.agent_log_service import AgentLogService
 from app.services.agent_service import AgentService
 from app.services.heuristics_service import HeuristicsService
-from app.services.profile_service import ProfileContextService
+from app.services.profile_context_service import ProfileContextService
 from app.services.shipment_service import ShipmentService
 
 logger = logging.getLogger(__name__)
@@ -179,12 +179,22 @@ class AgentOrchestrator:
             # Fetch all in-transit shipments in the sector
             # (simplified; in production, add sector filtering to ShipmentService)
             shipments = await self.shipment_service.get_by_status(ShipmentStatus.IN_TRANSIT)
+            if sector and sector != "*":
+                shipments = [
+                    shipment for shipment in shipments
+                    if sector.lower() in (shipment.destination or "").lower()
+                    or sector.lower() in (shipment.origin or "").lower()
+                ]
+
+            effective_incident_ids = incident_ids or []
+            if threat_level != "NORMAL" and not effective_incident_ids:
+                effective_incident_ids = [f"manual-{threat_level.lower()}"]
 
             results = []
             for shipment in shipments:
                 result = await self.run_for_shipment(
                     shipment_id=shipment.id,
-                    incident_ids=incident_ids,
+                    incident_ids=effective_incident_ids,
                 )
                 results.append(result)
 
@@ -352,7 +362,8 @@ class AgentOrchestrator:
             if agent:
                 shipment.agent_id = agent.id
 
-            await self.shipment_service.create(shipment)
+            await self.db.flush()
+            await self.db.refresh(shipment)
             return shipment
 
         except Exception as e:

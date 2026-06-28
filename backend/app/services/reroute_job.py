@@ -12,12 +12,14 @@ This service:
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.orchestrator import AgentOrchestrator
 from app.database.session import AsyncSessionLocal
+from app.models.reroute_job import RerouteJob, RerouteJobStatus
 from app.models.shipment import ShipmentStatus
 from app.services.shipment_service import ShipmentService
 
@@ -51,6 +53,16 @@ async def run_reroute_job(
 
     async with AsyncSessionLocal() as db:
         try:
+            job = RerouteJob(
+                shipment_id=shipment_id,
+                status=RerouteJobStatus.RUNNING,
+                reason="agent_reroute",
+                input={"shipment_id": shipment_id, "incident_ids": incident_ids or []},
+                started_at=datetime.now(timezone.utc),
+            )
+            db.add(job)
+            await db.flush()
+
             # Initialize the orchestrator
             orchestrator = AgentOrchestrator(db)
 
@@ -62,7 +74,12 @@ async def run_reroute_job(
 
             if "error" in result:
                 logger.error(f"Orchestration error for shipment {shipment_id}: {result['error']}")
+                job.status = RerouteJobStatus.FAILED
+                job.result = {"error": result["error"]}
+                job.finished_at = datetime.now(timezone.utc)
+                await db.commit()
                 return {
+                    "job_id": job.id,
                     "shipment_id": shipment_id,
                     "status": "error",
                     "error": result["error"],
@@ -78,6 +95,27 @@ async def run_reroute_job(
             primary_action = actions[0] if actions else None
             action_type = primary_action.action_type if primary_action else "MONITOR"
             confidence = primary_action.confidence if primary_action else 0.0
+            job.status = RerouteJobStatus.COMPLETED
+            job.result = {
+                "shipment_id": shipment.id,
+                "shipment_code": shipment.shipment_code,
+                "status": shipment.status.value,
+                "action_taken": action_type,
+                "confidence": confidence,
+                "actions": [
+                    {
+                        "agent_name": action.agent_name,
+                        "action_type": action.action_type,
+                        "payload": action.payload,
+                        "confidence": action.confidence,
+                    }
+                    for action in actions
+                ],
+                "heuristic_adjustments": heuristic_adjustments,
+            }
+            job.agent_name = primary_action.agent_name if primary_action else "AgentOrchestrator"
+            job.confidence = confidence
+            job.finished_at = datetime.now(timezone.utc)
 
             logger.info(
                 f"Reroute job complete for shipment {shipment.shipment_code}: "
@@ -87,6 +125,7 @@ async def run_reroute_job(
             await db.commit()
 
             return {
+                "job_id": job.id,
                 "shipment_id": shipment.id,
                 "shipment_code": shipment.shipment_code,
                 "status": shipment.status.value,
