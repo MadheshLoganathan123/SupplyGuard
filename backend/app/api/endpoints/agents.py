@@ -9,10 +9,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.dependencies import AuthUser, require_roles
 from app.agents.orchestrator import AgentOrchestrator
 from app.database.session import get_db
 from app.schemas.agent import AgentCreate, AgentRead, AgentUpdate
 from app.schemas.reports import AgentPerformanceRead
+from app.schemas.user import UserRole
 from app.services.agent_service import AgentService
 from app.services.reporting_service import ReportingService
 from app.services.reroute_job import run_reroute_job
@@ -38,6 +40,7 @@ class OrchestrateRequest(BaseModel):
 @router.post("/orchestrate", response_model=Dict[str, Any])
 async def trigger_orchestration(
     payload: OrchestrateRequest,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN, UserRole.FARMER, UserRole.DRIVER, UserRole.STORE_OWNER])),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -135,13 +138,20 @@ async def get_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/", response_model=AgentRead, status_code=status.HTTP_201_CREATED)
-async def create_agent(payload: AgentCreate, db: AsyncSession = Depends(get_db)):
+async def create_agent(
+    payload: AgentCreate,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN])),
+    db: AsyncSession = Depends(get_db),
+):
     return await AgentService(db).create(payload)
 
 
 @router.patch("/{agent_id}", response_model=AgentRead)
 async def update_agent(
-    agent_id: str, payload: AgentUpdate, db: AsyncSession = Depends(get_db)
+    agent_id: str,
+    payload: AgentUpdate,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN])),
+    db: AsyncSession = Depends(get_db),
 ):
     svc = AgentService(db)
     agent = await svc.get_by_id(agent_id)
@@ -181,6 +191,7 @@ class InterventionRequest(BaseModel):
 @router.post("/orchestrate/reroute", response_model=Dict[str, Any])
 async def orchestrate_shipment_reroute(
     payload: RerouteRequest,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN, UserRole.FARMER, UserRole.STORE_OWNER])),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -236,6 +247,7 @@ async def orchestrate_shipment_reroute(
 @router.post("/orchestrate/sector", response_model=Dict[str, Any])
 async def orchestrate_sector_reroute(
     payload: SectorRerouteRequest,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN, UserRole.FARMER, UserRole.STORE_OWNER])),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -285,7 +297,10 @@ async def orchestrate_sector_reroute(
 
 
 @router.post("/jobs/reroute", response_model=Dict[str, Any])
-async def submit_reroute_job(payload: RerouteRequest):
+async def submit_reroute_job(
+    payload: RerouteRequest,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN, UserRole.FARMER, UserRole.STORE_OWNER])),
+):
     """
     Submit an async reroute job (background processing).
     
@@ -316,7 +331,10 @@ async def submit_reroute_job(payload: RerouteRequest):
 
 
 @router.post("/jobs/projection", response_model=Dict[str, Any])
-async def submit_projection_job(payload: ProjectionRequest):
+async def submit_projection_job(
+    payload: ProjectionRequest,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN, UserRole.FARMER, UserRole.STORE_OWNER])),
+):
     """
     Submit a demand projection job with optional agent orchestration.
     
@@ -349,7 +367,10 @@ async def submit_projection_job(payload: ProjectionRequest):
 
 
 @router.post("/jobs/intervention", response_model=Dict[str, Any])
-async def submit_intervention_job(payload: InterventionRequest):
+async def submit_intervention_job(
+    payload: InterventionRequest,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN, UserRole.FARMER, UserRole.DRIVER, UserRole.STORE_OWNER, UserRole.PANTRY_MANAGER])),
+):
     """
     Process an operator intervention through the agent system.
     

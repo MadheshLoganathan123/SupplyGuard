@@ -1,7 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import Link from "next/link";
 import { User } from "@supabase/supabase-js";
 import { supabase } from "../lib/supabaseClient";
@@ -30,6 +30,10 @@ function AppChrome({ children }: { children: React.ReactNode }) {
   const [rerouting, setRerouting] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [authUser, setAuthUser] = useState<User | null>(null);
+  const [showNotifications, setShowNotifications] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [notifications, setNotifications] = useState<Array<{ id: string; title: string; body: string; notification_type: string; read: boolean; created_at: string; link: string | null }>>([]);
+  const notifRef = useRef<HTMLDivElement>(null);
 
   // Dynamic AI status text
   const aiStatusText =
@@ -81,6 +85,28 @@ function AppChrome({ children }: { children: React.ReactNode }) {
       setRerouting(false);
     }
   };
+
+  const fetchNotifications = useCallback(async () => {
+    try {
+      const { data: sess } = await supabase.auth.getSession();
+      const token = sess?.session?.access_token;
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const res = await fetch(`${BACKEND_URL}/notifications?limit=10`, { headers });
+      if (res.ok) {
+        const data = await res.json();
+        setNotifications(data.items ?? []);
+        setUnreadCount(data.unread ?? 0);
+      }
+    } catch { /* ignore */ }
+  }, [BACKEND_URL]);
+
+  useEffect(() => {
+    if (!authUser) return;
+    fetchNotifications();
+    const interval = setInterval(fetchNotifications, 30000);
+    return () => clearInterval(interval);
+  }, [authUser, fetchNotifications]);
 
   useEffect(() => {
     if (!toastMessage) return;
@@ -204,11 +230,85 @@ function AppChrome({ children }: { children: React.ReactNode }) {
               />
             </div>
           </div>
-          <div className="flex items-center gap-md">
-            <button className="p-2 text-on-surface-variant hover:bg-surface-variant/50 rounded-full transition-colors relative">
+          <div className="flex items-center gap-md relative">
+            <button
+              onClick={() => setShowNotifications(!showNotifications)}
+              className="p-2 text-on-surface-variant hover:bg-surface-variant/50 rounded-full transition-colors relative"
+            >
               <span className="material-symbols-outlined">notifications_active</span>
-              <span className="absolute top-2 right-2 w-2 h-2 bg-secondary rounded-full" />
+              {unreadCount > 0 && (
+                <span className="absolute -top-0.5 -right-0.5 w-5 h-5 bg-secondary text-on-secondary text-[10px] font-bold rounded-full flex items-center justify-center">
+                  {unreadCount > 99 ? "99+" : unreadCount}
+                </span>
+              )}
             </button>
+
+            {showNotifications && (
+              <div
+                ref={notifRef}
+                className="absolute top-full right-0 mt-2 w-80 bg-surface border border-outline-variant/30 rounded-xl shadow-2xl z-50 max-h-96 flex flex-col overflow-hidden"
+              >
+                <div className="flex items-center justify-between px-md py-sm border-b border-outline-variant/20">
+                  <span className="text-label-sm font-semibold">Notifications</span>
+                  <button
+                    onClick={async () => {
+                      try {
+                        const { data: sess } = await supabase.auth.getSession();
+                        const token = sess?.session?.access_token;
+                        const headers: Record<string, string> = { "Content-Type": "application/json" };
+                        if (token) headers["Authorization"] = `Bearer ${token}`;
+                        await fetch(`${BACKEND_URL}/notifications/read-all`, { method: "POST", headers });
+                        setUnreadCount(0);
+                        setNotifications(prev => prev.map(n => ({ ...n, read: true })));
+                      } catch { /* ignore */ }
+                    }}
+                    className="text-[11px] text-primary hover:underline"
+                  >
+                    Mark all read
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto">
+                  {notifications.length === 0 && (
+                    <div className="p-md text-center text-on-surface-variant text-sm">No notifications</div>
+                  )}
+                  {notifications.map((n) => (
+                    <div
+                      key={n.id}
+                      className={`px-md py-sm border-b border-outline-variant/10 text-sm hover:bg-surface-variant/30 cursor-pointer transition-colors ${n.read ? "" : "bg-primary/5 border-l-2 border-l-primary"}`}
+                      onClick={async () => {
+                        if (!n.read) {
+                          try {
+                            const { data: sess } = await supabase.auth.getSession();
+                            const token = sess?.session?.access_token;
+                            const headers: Record<string, string> = { "Content-Type": "application/json" };
+                            if (token) headers["Authorization"] = `Bearer ${token}`;
+                            await fetch(`${BACKEND_URL}/notifications/${n.id}/read`, { method: "PATCH", headers });
+                            setUnreadCount(prev => Math.max(0, prev - 1));
+                            setNotifications(prev => prev.map(x => x.id === n.id ? { ...x, read: true } : x));
+                          } catch { /* ignore */ }
+                        }
+                        if (n.link) window.open(n.link, "_blank");
+                      }}
+                    >
+                      <div className="flex items-center gap-sm">
+                        <span className={`material-symbols-outlined text-[16px] ${n.notification_type === "warning" ? "text-warning" : n.notification_type === "error" ? "text-error" : "text-primary"}`}>
+                          {n.notification_type === "warning" ? "warning" : n.notification_type === "error" ? "error" : "info"}
+                        </span>
+                        <span className="font-medium text-label-sm flex-1">{n.title}</span>
+                      </div>
+                      {n.body && <p className="text-on-surface-variant text-[12px] mt-1 ml-7">{n.body}</p>}
+                      <p className="text-[10px] text-on-surface-variant/60 mt-1 ml-7">{new Date(n.created_at).toLocaleString()}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Click outside to close */}
+            {showNotifications && (
+              <div className="fixed inset-0 z-40" onClick={() => setShowNotifications(false)} />
+            )}
+
             <button className="p-2 text-on-surface-variant hover:bg-surface-variant/50 rounded-full transition-colors">
               <span className="material-symbols-outlined">settings</span>
             </button>

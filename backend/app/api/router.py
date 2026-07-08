@@ -15,6 +15,7 @@ from app.api.endpoints import (
     inventory,
     network,
     nodes,
+    notifications,
     profiles,
     projections,
     reports,
@@ -39,6 +40,9 @@ api_router.include_router(routing.router,   prefix="/routing",   tags=["Routing"
 # ── Auth & user profiles ──────────────────────────────────────────────────────
 api_router.include_router(auth.router,      prefix="/auth",      tags=["Auth"])
 api_router.include_router(profiles.router,                       tags=["Profiles"])  # has its own /profiles prefix
+
+# ── Notifications ────────────────────────────────────────────────────────────
+api_router.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
 
 # ── Monitoring & intelligence ─────────────────────────────────────────────────
 api_router.include_router(agents.router,    prefix="/agents",    tags=["Agents"])

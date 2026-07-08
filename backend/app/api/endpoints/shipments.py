@@ -7,10 +7,12 @@ from typing import List
 from fastapi import APIRouter, Depends, HTTPException, Query, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.dependencies import AuthUser, require_roles
 from app.database.session import get_db
 from app.models.shipment import ShipmentStatus
 from app.schemas.agent_log import AgentLogCreate
 from app.schemas.shipment import ShipmentCreate, ShipmentRead, ShipmentUpdate
+from app.schemas.user import UserRole
 from app.services.log_service import LogService
 from app.services.shipment_service import ShipmentService
 from app.services.reroute_job import run_reroute_job
@@ -49,6 +51,7 @@ async def get_shipment(shipment_id: str, db: AsyncSession = Depends(get_db)):
 )
 async def create_shipment(
     payload: ShipmentCreate,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN, UserRole.FARMER, UserRole.DRIVER, UserRole.STORE_OWNER, UserRole.PANTRY_MANAGER])),
     db: AsyncSession = Depends(get_db),
 ):
     svc = ShipmentService(db)
@@ -88,6 +91,7 @@ async def create_shipment(
 async def update_shipment(
     shipment_id: str,
     payload: ShipmentUpdate,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN, UserRole.FARMER, UserRole.DRIVER, UserRole.STORE_OWNER, UserRole.PANTRY_MANAGER])),
     db: AsyncSession = Depends(get_db),
 ):
     svc = ShipmentService(db)
@@ -101,6 +105,7 @@ async def update_shipment(
 async def trigger_reroute(
     shipment_id: str,
     background_tasks: BackgroundTasks,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN, UserRole.DRIVER, UserRole.STORE_OWNER])),
     db: AsyncSession = Depends(get_db),
 ):
     svc = ShipmentService(db)
@@ -113,7 +118,11 @@ async def trigger_reroute(
 
 
 @router.delete("/{shipment_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_shipment(shipment_id: str, db: AsyncSession = Depends(get_db)):
+async def delete_shipment(
+    shipment_id: str,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN])),
+    db: AsyncSession = Depends(get_db),
+):
     svc = ShipmentService(db)
     shipment = await svc.get_by_id(shipment_id)
     if not shipment:

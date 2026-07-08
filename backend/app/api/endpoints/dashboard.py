@@ -4,10 +4,12 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.dependencies import AuthUser, require_roles
 from app.database.session import get_db
 from app.schemas.agent_log import AgentLogRead
 from app.schemas.dashboard import DashboardMetrics, InterventionCreate, InterventionRead
 from app.schemas.telemetry import TelemetryCreate, TelemetryRead
+from app.schemas.user import UserRole
 from app.services.agent_log_service import AgentLogService
 from app.services.dashboard_service import DashboardService
 from app.services.intervention_service import InterventionService
@@ -36,6 +38,7 @@ async def get_dashboard_metrics(db: AsyncSession = Depends(get_db)):
 )
 async def ingest_telemetry(
     payload: TelemetryCreate,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN, UserRole.FARMER, UserRole.DRIVER, UserRole.STORE_OWNER])),
     db: AsyncSession = Depends(get_db),
 ):
     svc = TelemetryService(db)
@@ -82,6 +85,7 @@ async def get_agent_logs(
 )
 async def create_intervention(
     payload: InterventionCreate,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN, UserRole.FARMER, UserRole.DRIVER, UserRole.STORE_OWNER, UserRole.PANTRY_MANAGER])),
     db: AsyncSession = Depends(get_db),
 ):
     svc = InterventionService(db)

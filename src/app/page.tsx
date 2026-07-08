@@ -125,7 +125,7 @@ export default function Dashboard() {
     {
       onMessage: (message) => {
         if (message.type === 'agent_action') {
-          const action = message.data || {};
+          const action = (message.data || {}) as { agent_name?: string; reasoning?: string; message?: string };
           setLogs(prev => [...prev, {
             agent: action.agent_name || 'Agent',
             color: 'text-primary',
@@ -133,7 +133,7 @@ export default function Dashboard() {
           }].slice(-15));
           fetchDashboard();
         } else if (message.type === 'incident_alert') {
-          const incident = message.data || {};
+          const incident = (message.data || {}) as { type?: string; description?: string };
           setLogs(prev => [...prev, {
             agent: 'Alert System',
             color: message.severity === 'critical' ? 'text-error' : 'text-warning',

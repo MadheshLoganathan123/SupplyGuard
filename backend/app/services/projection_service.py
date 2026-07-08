@@ -1,14 +1,17 @@
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Optional
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents.orchestrator import AgentOrchestrator
 from app.database.session import AsyncSessionLocal
+from app.models.inventory import Inventory
+from app.models.node import Node
 from app.models.projection import Projection, ProjectionStatus
+from app.models.shipment import Shipment, ShipmentStatus
 from app.schemas.projection import ProjectionCreate
 from app.services.heuristics_service import HeuristicsService
 
@@ -139,26 +142,64 @@ async def run_projection_job(
 
 async def _compute_base_projection(projection: Projection) -> Dict[str, Any]:
     """
-    Compute baseline demand vs supply projection.
-
-    In production, this would integrate with an ML forecasting model
-    or statistical demand projection service.
+    Compute baseline demand vs supply projection using real inventory data.
     """
-    logger.info(f"Computing base projection for nodes: {projection.input.get('node_ids', [])}")
-
-    node_count = len(projection.input.get("node_ids", []))
+    node_ids = projection.input.get("node_ids", [])
     horizon_days = projection.input.get("horizon_days", 7)
+    logger.info(f"Computing base projection for {len(node_ids)} nodes, horizon={horizon_days}d")
 
-    # Simplified calculation: supply margins improve with horizon length
-    # and degrade with node count (more complexity)
-    supply_margin = max(1.0, 4.2 - node_count * 0.05 + horizon_days * 0.1)
+    async with AsyncSessionLocal() as db:
+        # Total inventory stock across relevant nodes
+        stock_q = select(func.coalesce(func.sum(Inventory.quantity), 0))
+        if node_ids:
+            stock_q = stock_q.where(Inventory.node_id.in_(node_ids))
+        total_stock = (await db.scalar(stock_q)) or 0
 
-    return {
-        "summary": f"Projection complete: supply matches demand (+{supply_margin:.1f}% margin) over {horizon_days}d.",
-        "supply_demand_gap_pct": max(0.5, 100 - supply_margin),
-        "nodes_analyzed": node_count,
-        "horizon_days": horizon_days,
-    }
+        # Count active shipments (in-transit = incoming supply)
+        ship_q = select(func.count()).select_from(Shipment).where(
+            Shipment.status == ShipmentStatus.IN_TRANSIT
+        )
+        if node_ids:
+            ship_q = ship_q.where(Shipment.destination_node_id.in_(node_ids))
+        incoming_shipments = (await db.scalar(ship_q)) or 0
+
+        # Average shipment volume per node
+        vol_q = select(func.coalesce(func.avg(Shipment.quantity), 0))
+        if node_ids:
+            vol_q = vol_q.where(Shipment.destination_node_id.in_(node_ids))
+        avg_shipment_volume = (await db.scalar(vol_q)) or 0
+
+        # Node count
+        if node_ids:
+            node_count = len(node_ids)
+        else:
+            node_count = (await db.scalar(select(func.count()).select_from(Node))) or 1
+
+        # Supply margin: stock + incoming supply over horizon
+        incoming_volume = incoming_shipments * avg_shipment_volume
+        total_supply = total_stock + incoming_volume
+
+        # Estimate daily demand per node (placeholder: 100 units/node/day)
+        estimated_daily_demand = node_count * 100.0
+        total_demand = estimated_daily_demand * horizon_days
+
+        supply_margin = max(1.0, (total_supply / total_demand * 100)) if total_demand > 0 else 100.0
+        gap = max(0.0, 100.0 - supply_margin)
+
+        return {
+            "summary": (
+                f"Projection over {horizon_days}d: stock={total_stock:.0f}u, "
+                f"incoming={incoming_volume:.0f}u, demand={total_demand:.0f}u, "
+                f"margin={supply_margin:.1f}%."
+            ),
+            "supply_demand_gap_pct": round(gap, 1),
+            "nodes_analyzed": node_count,
+            "horizon_days": horizon_days,
+            "total_stock": total_stock,
+            "incoming_shipments": incoming_shipments,
+            "avg_shipment_volume": avg_shipment_volume,
+            "estimated_daily_demand": estimated_daily_demand,
+        }
 
 
 async def _run_agent_sourcing(

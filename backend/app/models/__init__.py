@@ -19,6 +19,7 @@ from app.models.heuristic import Heuristic
 from app.models.agent_performance import AgentPerformance
 from app.models.export_job import ExportJob
 from app.models.reroute_job import RerouteJob
+from app.models.notification import Notification
 
 __all__ = [
     "User",
@@ -38,4 +39,5 @@ __all__ = [
     "AgentPerformance",
     "ExportJob",
     "RerouteJob",
+    "Notification",
 ]

@@ -7,8 +7,10 @@ from typing import List
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.dependencies import AuthUser, require_roles
 from app.database.session import get_db
 from app.schemas.heuristic import HeuristicCreate, HeuristicRead
+from app.schemas.user import UserRole
 from app.services.heuristics_service import HeuristicsService
 
 router = APIRouter()
@@ -27,6 +29,7 @@ async def list_heuristics(db: AsyncSession = Depends(get_db)):
 )
 async def save_heuristics(
     payload: HeuristicCreate,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN])),
     db: AsyncSession = Depends(get_db),
 ):
     heuristic = await HeuristicsService(db).create(payload)

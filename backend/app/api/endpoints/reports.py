@@ -6,6 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, s
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.dependencies import AuthUser, require_roles
 from app.database.session import get_db
 from app.schemas.reports import (
     AgentPerformanceRead,
@@ -14,6 +15,7 @@ from app.schemas.reports import (
     ExportJobResponse,
     ReportsMetrics,
 )
+from app.schemas.user import UserRole
 from app.services.reporting_service import ReportingService, run_export_job
 
 router = APIRouter()
@@ -42,6 +44,7 @@ async def create_export(
     background_tasks: BackgroundTasks,
     fmt: str = Query("json", pattern="^(pdf|xls|json)$"),
     payload: ExportJobCreate | None = None,
+    current_user: AuthUser = Depends(require_roles([UserRole.ADMIN, UserRole.FARMER, UserRole.STORE_OWNER])),
     db: AsyncSession = Depends(get_db),
 ):
     query = payload.query if payload else {}

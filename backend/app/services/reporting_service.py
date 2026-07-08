@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -86,6 +87,66 @@ class ReportingService:
         return await self.db.get(ExportJob, job_id)
 
 
+def _generate_pdf_html(payload: dict) -> str:
+    """Generate a self-contained HTML document for PDF export."""
+    metrics = payload.get("metrics", {})
+    incidents = payload.get("incidents", [])
+    agents = payload.get("agent_performance", [])
+    now = payload.get("generated_at", datetime.now(timezone.utc).isoformat())
+
+    rows = ""
+    for inc in incidents:
+        rows += f"""<tr>
+            <td>{inc.get('title', '')}</td>
+            <td>{inc.get('severity', '')}</td>
+            <td>{inc.get('sector', '-')}</td>
+            <td>{inc.get('status', '')}</td>
+            <td>{inc.get('occurred_at', '')[:10]}</td>
+        </tr>"""
+
+    agent_rows = ""
+    for a in agents:
+        agent_rows += f"""<tr>
+            <td>{a.get('name', '')}</td>
+            <td>{a.get('efficiency_pct', 0)}%</td>
+            <td>{a.get('negotiation_speed_avg_sec', 0)}s</td>
+            <td>{a.get('route_accuracy_pct', 0)}%</td>
+        </tr>"""
+
+    return f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>SupplyGuard Audit Report</title>
+<style>
+  body {{ font-family: 'Courier New', monospace; font-size: 12px; color: #1a1a1a; padding: 40px; }}
+  h1 {{ font-size: 22px; border-bottom: 2px solid #4edea3; padding-bottom: 8px; }}
+  h2 {{ font-size: 16px; margin-top: 30px; color: #0b1326; }}
+  table {{ width: 100%; border-collapse: collapse; margin: 10px 0 20px; }}
+  th, td {{ border: 1px solid #ccc; padding: 6px 10px; text-align: left; font-size: 11px; }}
+  th {{ background: #f5f5f5; font-weight: bold; }}
+  .meta {{ display: flex; gap: 30px; margin: 15px 0; }}
+  .meta-item {{ background: #f9f9f9; padding: 10px 15px; border-radius: 6px; flex: 1; }}
+  .meta-item span {{ display: block; font-size: 18px; font-weight: bold; color: #0b1326; }}
+  .footer {{ margin-top: 40px; font-size: 10px; color: #888; border-top: 1px solid #eee; padding-top: 10px; }}
+</style>
+</head>
+<body>
+<h1>SupplyGuard — Audit Report</h1>
+<p>Generated: {now}</p>
+<div class="meta">
+  <div class="meta-item">Food Security Gaps Prevented<span>{metrics.get('food_security_gaps_prevented', 0)}</span></div>
+  <div class="meta-item">Tons Rerouted<span>{metrics.get('tons_rerouted', 0)}t</span></div>
+  <div class="meta-item">Resilience Index<span>{metrics.get('resilience_index', 0)}</span></div>
+  <div class="meta-item">Reroute Capacity<span>{metrics.get('reroute_capacity_pct', 0)}%</span></div>
+</div>
+<h2>Incident Report ({len(incidents)})</h2>
+<table><thead><tr><th>Title</th><th>Severity</th><th>Sector</th><th>Status</th><th>Date</th></tr></thead><tbody>{rows or '<tr><td colspan="5">No incidents recorded.</td></tr>'}</tbody></table>
+<h2>Agent Performance ({len(agents)})</h2>
+<table><thead><tr><th>Agent</th><th>Efficiency</th><th>Negotiation Speed</th><th>Route Accuracy</th></tr></thead><tbody>{agent_rows or '<tr><td colspan="4">No performance data.</td></tr>'}</tbody></table>
+<div class="footer">SupplyGuard v0.1.0 — Confidential</div>
+</body>
+</html>"""
+
+
 async def run_export_job(job_id: str) -> None:
     logger.info("Starting export job %s", job_id)
     await asyncio.sleep(1)
@@ -132,8 +193,16 @@ async def run_export_job(job_id: str) -> None:
             "agent_performance": [p.model_dump(mode="json") for p in performances],
         }
 
+        fmt = job.format
+        if fmt == "pdf":
+            job.result_data = {
+                "html": _generate_pdf_html(payload),
+                "format": "pdf",
+            }
+        else:
+            job.result_data = payload
+
         job.status = ExportStatus.DONE.value
-        job.result_data = payload
         job.finished_at = datetime.now(timezone.utc)
         await db.commit()
-        logger.info("Export job %s completed", job_id)
+        logger.info("Export job %s completed (format=%s)", job_id, fmt)
