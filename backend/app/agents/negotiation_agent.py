@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.base_agent import AgentAction, AgentContext, BaseAgent
 from app.services.agent_tools import AgentTools
 from app.services.incident_service import IncidentService
-from app.services.intervention_service import InterventionService
 from app.services.llm_service import LLMService
 
 logger = logging.getLogger(__name__)
@@ -35,6 +34,7 @@ class NegotiationAgent(BaseAgent):
         self.tools = AgentTools(db)
         self.llm_service = LLMService()
         self.incident_service = IncidentService(db)
+        from app.services.intervention_service import InterventionService
         self.intervention_service = InterventionService(db)
 
     async def perceive(self, context: AgentContext) -> dict[str, Any]:

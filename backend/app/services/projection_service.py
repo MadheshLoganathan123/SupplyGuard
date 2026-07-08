@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.agents.orchestrator import AgentOrchestrator
 from app.database.session import AsyncSessionLocal
 from app.models.inventory import Inventory
-from app.models.node import Node
+from app.models.supply_node import SupplyNode
 from app.models.projection import Projection, ProjectionStatus
 from app.models.shipment import Shipment, ShipmentStatus
 from app.schemas.projection import ProjectionCreate
@@ -173,7 +173,7 @@ async def _compute_base_projection(projection: Projection) -> Dict[str, Any]:
         if node_ids:
             node_count = len(node_ids)
         else:
-            node_count = (await db.scalar(select(func.count()).select_from(Node))) or 1
+            node_count = (await db.scalar(select(func.count()).select_from(SupplyNode))) or 1
 
         # Supply margin: stock + incoming supply over horizon
         incoming_volume = incoming_shipments * avg_shipment_volume
